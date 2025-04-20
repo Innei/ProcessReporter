@@ -110,6 +110,10 @@ class SettingWindow: NSWindow {
 		switchToTab(.filter)
 	}
 
+	@objc private func switchToMapping() {
+		switchToTab(.mapping)
+	}
+
 	private func switchToTab(_ tab: TabIdentifier) {
 		let vcType: NSViewController.Type
 		let currentViewController = rootViewController.children.first
@@ -119,12 +123,14 @@ class SettingWindow: NSWindow {
 		case .integration: vcType = PreferencesIntegrationViewController.self
 		case .filter: vcType = PreferencesFilterViewController.self
 		case .history:
-				vcType = PreferencesHistoryViewController.self
+			vcType = PreferencesHistoryViewController.self
+		case .mapping:
+			vcType = PreferencesMappingViewController.self
 		}
 		if currentViewController?.isKind(of: vcType.classForCoder()) == true {
 			return
 		}
-		
+
 		let vc = vcType.init()
 
 		// 为当前视图创建淡出动画
@@ -187,6 +193,7 @@ class SettingWindow: NSWindow {
 		case integration
 		case history
 		case filter
+		case mapping
 	}
 
 	//    private func saveWindowFrame() {
@@ -241,13 +248,14 @@ extension NSToolbarItem.Identifier {
 	static let integration = NSToolbarItem.Identifier("integration")
 	static let history = NSToolbarItem.Identifier("history")
 	static let filter = NSToolbarItem.Identifier("filter")
+	static let mapping = NSToolbarItem.Identifier("mapping")
 }
 
 // MARK: - Toolbar Delegate
 
 extension SettingWindow: NSToolbarDelegate {
 	func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-		return [.general, .integration, .filter, .history]
+		return [.general, .integration, .filter, .mapping, .history]
 	}
 
 	func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -288,6 +296,12 @@ extension SettingWindow: NSToolbarDelegate {
 			item.label = "Filter"
 			item.image = NSImage(systemSymbolName: "line.horizontal.3.decrease.circle", accessibilityDescription: "Filter")
 			item.action = #selector(switchToFilter)
+			item.isEnabled = true
+
+		case .mapping:
+			item.label = "Mapping"
+			item.image = NSImage(systemSymbolName: "arrow.trianglehead.swap", accessibilityDescription: "Mapping")
+			item.action = #selector(switchToMapping)
 			item.isEnabled = true
 
 		default:
