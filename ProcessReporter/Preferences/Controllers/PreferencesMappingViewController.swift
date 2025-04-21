@@ -173,6 +173,8 @@ struct AddNewMappingView: View {
 		}
 	}
 
+	@State var appSelectorOpen = false
+
 	var body: some View {
 		VStack(alignment: .leading, spacing: 20) {
 			Text(mode == Mode.add ? "Add New Mapping" : "Edit Mapping")
@@ -184,9 +186,19 @@ struct AddNewMappingView: View {
 				GridRow {
 					Text("From")
 						.frame(width: 70, alignment: .trailing)
-					TextField("Enter the original name", text: $from)
-						.textFieldStyle(RoundedBorderTextFieldStyle())
-						.frame(minWidth: 200)
+					ZStack(alignment: .trailing) {
+						TextField("Enter the original name", text: $from)
+							.textFieldStyle(RoundedBorderTextFieldStyle())
+							.frame(minWidth: 200)
+
+						if type == .processApplicationIdentifier || type == .mediaProcessApplicationIdentifier {
+							Button {
+								appSelectorOpen.toggle()
+							} label: {
+								Image(systemName: "scope").font(.system(size: 12, weight: .bold))
+							}.buttonStyle(.plain).padding(.trailing, 3)
+						}
+					}
 				}
 				GridRow {
 					Text("Filter Type")
@@ -201,7 +213,7 @@ struct AddNewMappingView: View {
 				}
 				GridRow {
 					Text("Target Name")
-						.frame(width: 70, alignment: .trailing)
+						.frame(width: 100, alignment: .trailing)
 					TextField("Enter target process name", text: $to)
 						.textFieldStyle(RoundedBorderTextFieldStyle())
 						.frame(minWidth: 200)
@@ -229,5 +241,12 @@ struct AddNewMappingView: View {
 		}
 		.padding(24)
 		.frame(width: 380)
+		.sheet(isPresented: $appSelectorOpen) {
+			AppPickerView { id, _ in
+				appSelectorOpen = false
+				guard let id = id else { return }
+				from = id
+			}.frame(width: 400, height: 500)
+		}
 	}
 }
