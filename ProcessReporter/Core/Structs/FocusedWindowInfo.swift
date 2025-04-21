@@ -9,11 +9,11 @@ import Foundation
 import Cocoa
 
 struct FocusedWindowInfo {
-    let appName: String
-    let icon: NSImage?
-    let applicationIdentifier: String
+    var appName: String
+    var icon: NSImage?
+    var applicationIdentifier: String
 
-    let title: String?
+    var title: String?
 
     init(appName: String, icon: NSImage?, applicationIdentifier: String, title: String? = nil) {
         self.appName = appName

@@ -10,11 +10,11 @@ import Foundation
 
 private struct MixSpaceDataPayload: Codable {
     struct MediaInfo: Codable {
-        let artist: String?
-        let title: String?
-        let duration: Double?
-        let elapsedTime: Double?
-        let processName: String?
+        var artist: String?
+        var title: String?
+        var duration: Double?
+        var elapsedTime: Double?
+        var processName: String?
     }
 
     struct ProcessInfo: Codable {

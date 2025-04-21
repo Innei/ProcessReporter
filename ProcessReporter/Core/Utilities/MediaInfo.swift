@@ -15,7 +15,7 @@ struct MediaInfo {
 	let duration: Double
 	let elapsedTime: Double
 	let processID: Int
-	let processName: String
+	var processName: String
 	let executablePath: String
 	let playing: Bool
 	
