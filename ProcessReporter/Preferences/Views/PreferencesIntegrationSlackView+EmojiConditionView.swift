@@ -135,6 +135,8 @@ extension PreferencesIntegrationSlackView {
 				itemView.sizeToFit()
 				previousItem = itemView
 			}
+
+			layout()
 		}
 
 		private func handleDragStart(_ view: ConditionFormItemView) {
@@ -286,6 +288,13 @@ extension PreferencesIntegrationSlackView {
 			updateItems()
 		}
 
+		func layout() {
+			contentView.snp.makeConstraints { make in
+				guard let lastView = itemViews.last else { return }
+				make.bottom.equalTo(lastView.snp.bottom).offset(16)
+			}
+		}
+
 		private func setupUI() {
 			view.addSubview(titleLabel)
 			view.addSubview(scrollView)
@@ -297,8 +306,9 @@ extension PreferencesIntegrationSlackView {
 
 			scrollView.documentView = contentView
 			contentView.snp.makeConstraints { make in
-				make.edges.equalToSuperview()
+				make.top.horizontalEdges.equalToSuperview()
 			}
+			layout()
 
 			scrollView.snp.makeConstraints { make in
 				make.top.equalTo(titleLabel.snp.bottom).offset(16)
@@ -373,6 +383,10 @@ extension PreferencesIntegrationSlackView.EmojiConditionViewController {
 
 			contentView.layoutSubtreeIfNeeded()
 			itemView.sizeToFit()
+
+			itemViews.append(itemView)
+
+			layout()
 		}
 	}
 }
