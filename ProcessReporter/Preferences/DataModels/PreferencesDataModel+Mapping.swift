@@ -36,9 +36,26 @@ extension PreferencesDataModel {
 		case mediaProcessName = "media_process_name"
 		case mediaProcessApplicationIdentifier = "media_process_application_identifier"
 		case processName = "process_name"
+		
+		func toCopyable() -> String {
+			switch self {
+				case .processApplicationIdentifier:
+					return "Process Application Identifier"
+				case .mediaProcessName:
+					return "Media Process Name"
+				case .mediaProcessApplicationIdentifier:
+					return "Media Process Application Identifier"
+				case .processName:
+					return "Process Name"
+			}
+		}
 	}
 
-	struct Mapping: DictionaryConvertible, UserDefaultsJSONStorable {
+	struct Mapping: DictionaryConvertible, UserDefaultsJSONStorable, Identifiable {
+		var id: String {
+			"\(from)-\(to)-\(type.rawValue)"
+		}
+		
 		static func fromDictionary(_ dict: Any) -> Mapping {
 			let dict = dict as! [String: Any]
 			let type = MappingType.fromDictionary(dict["type"]!)
@@ -50,6 +67,10 @@ extension PreferencesDataModel {
 		let type: MappingType
 		let from: String
 		let to: String
+		
+		static func == (lhs: Mapping, rhs: Mapping) -> Bool {
+			return lhs.type == rhs.type && lhs.from == rhs.from && lhs.to == rhs.to
+		}
 	}
 
 	struct MappingList: DictionaryConvertible, UserDefaultsJSONStorable, DictionaryConvertibleDelegate {
@@ -80,6 +101,28 @@ extension PreferencesDataModel {
 	 
 		func getList() -> [Mapping] {
 			return mappings
+		}
+
+		func addMapping(_ mapping: Mapping) {
+			PreferencesDataModel.shared.mappingList.accept(
+				MappingList(mappings: mappings + [mapping])
+			)
+		}
+		
+		func removeMapping(_ mappings: [Mapping]) {
+			PreferencesDataModel.shared.mappingList.accept(
+				MappingList(mappings: self.mappings.filter { item in
+					!mappings.contains(where: { $0 == item })
+				})
+			)
+		}
+
+		func editMapping(_ mapping: Mapping, for index: Int) {
+			PreferencesDataModel.shared.mappingList.accept(
+				MappingList(mappings: mappings.enumerated().map { i, item in
+					i == index ? mapping : item
+				})
+			)
 		}
 	}
 }
