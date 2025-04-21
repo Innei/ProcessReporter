@@ -33,9 +33,9 @@ extension PreferencesDataModel {
 		}
 
 		case processApplicationIdentifier = "process_application_identifier"
-		case mediaProcessName = "media_process_name"
-		case mediaProcessApplicationIdentifier = "media_process_application_identifier"
 		case processName = "process_name"
+		case mediaProcessApplicationIdentifier = "media_process_application_identifier"
+		case mediaProcessName = "media_process_name"
 		
 		func toCopyable() -> String {
 			switch self {
