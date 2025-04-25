@@ -289,8 +289,9 @@ extension PreferencesIntegrationSlackView {
 		}
 
 		func layout() {
-			contentView.snp.makeConstraints { make in
+            contentView.snp.remakeConstraints { make in
 				guard let lastView = itemViews.last else { return }
+                make.top.horizontalEdges.equalToSuperview()
 				make.bottom.equalTo(lastView.snp.bottom).offset(16)
 			}
 		}
