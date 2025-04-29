@@ -23,7 +23,7 @@ struct MediaInfo {
 }
 
 func getMediaInfo() -> MediaInfo? {
-	if let nowPlayingInfo = NowPlaying.getInfo() {
+	if let nowPlayingInfo = NowPlaying.getNowPlayingInfo() {
 		let name = nowPlayingInfo["name"] as? String
 		let artist = nowPlayingInfo["artist"] as? String
 		let elapsedTime = nowPlayingInfo["elapsedTime"] as? Double ?? 0
@@ -34,8 +34,7 @@ func getMediaInfo() -> MediaInfo? {
 		let artworkData = nowPlayingInfo["artworkData"] as? String ?? ""
 		let playing = nowPlayingInfo["isPlaying"] as? Bool ?? false
 		let album = nowPlayingInfo["album"] as? String ?? ""
-		let uniqueIdentifier = nowPlayingInfo["uniqueIdentifier"] as? String ?? ""
-		
+		 
 		let pid = pid_t(processID)
 		let bundleID = getBundleIdentifierForPID(pid)
 		 
