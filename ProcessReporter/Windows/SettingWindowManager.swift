@@ -5,7 +5,6 @@
 //  Created by Innei on 2025/4/12
 //
 
-import AppKit
 import Cocoa
 
 @MainActor

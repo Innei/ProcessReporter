@@ -5,7 +5,6 @@
 //  Created by Innei on 2025/4/6.
 //
 
-import AppKit
 import Cocoa
 
 class AppDelegate: NSObject, NSApplicationDelegate {

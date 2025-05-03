@@ -4,8 +4,8 @@
 //
 //  Created by Innei on 2025/4/8.
 //
-import Cocoa
 import Foundation
+import AppKit
 import SwiftData
 
 @Model
