@@ -41,6 +41,8 @@ private let descriptionDictionary: [String: String] = [
     "Xcode": "编辑",
     "Code": "编辑",
     "Cursor": "编辑",
+
+    "Capture One": "调色",
 ]
 
 private func sendMixSpaceRequest(data: ReportModel) async -> Result<Void, ReporterError> {

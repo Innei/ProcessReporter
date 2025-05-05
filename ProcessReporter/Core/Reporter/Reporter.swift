@@ -205,7 +205,7 @@ class Reporter {
 			statusItemManager.toggleStatusItemIcon(.syncing)
 		}
 
-		let mediaInfo = getMediaInfo()
+		let mediaInfo = MediaInfoManager.getMediaInfo()
 
 		var dataModel = ReportModel(
 			windowInfo: nil,
@@ -272,10 +272,10 @@ class Reporter {
 
 	init() {
 		reporterInitializedTime = Date()
-		
+
 		// Register all available extensions
 		initializeExtensions()
-		
+
 		subscribeSettingsChanged()
 	}
 
@@ -286,7 +286,7 @@ class Reporter {
 			S3ReporterExtension(),
 			SlackReporterExtension()
 		]
-		
+
 		for ext in extensions {
 			registerExtension(ext)
 		}
@@ -363,8 +363,7 @@ extension Reporter {
 		let d3 = Observable.combineLatest(
 			preferences.mixSpaceIntegration,
 			preferences.s3Integration,
-			preferences.slackIntegration
-		).subscribe { [weak self] _ in
+			preferences.slackIntegration).subscribe { [weak self] _ in
 			guard let self = self else { return }
 			Task {
 				await self.updateExtensions()

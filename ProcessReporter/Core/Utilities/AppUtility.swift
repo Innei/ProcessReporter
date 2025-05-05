@@ -14,7 +14,7 @@ struct AppInfo {
     let displayName: String
     let icon: NSImage
     let path: URL?
-    
+
     init(bundleID: String, displayName: String, icon: NSImage, path: URL? = nil) {
         self.bundleID = bundleID
         self.displayName = displayName
@@ -23,7 +23,8 @@ struct AppInfo {
     }
 
     static func defaultInfo(for bundleID: String) -> AppInfo {
-        let defaultIcon = NSImage(systemSymbolName: "app", accessibilityDescription: nil) ?? NSImage()
+        let defaultIcon =
+            NSImage(systemSymbolName: "app", accessibilityDescription: nil) ?? NSImage()
         return AppInfo(bundleID: bundleID, displayName: bundleID, icon: defaultIcon)
     }
 }
@@ -46,7 +47,8 @@ class AppUtility {
         }
 
         // 默认值
-        let defaultIcon = NSImage(systemSymbolName: "app", accessibilityDescription: nil) ?? NSImage()
+        let defaultIcon =
+            NSImage(systemSymbolName: "app", accessibilityDescription: nil) ?? NSImage()
         var displayName = bundleID
         var icon = defaultIcon
         var path: URL?
@@ -58,9 +60,13 @@ class AppUtility {
 
             // 尝试从Info.plist获取更精确的显示名称
             if let bundle = Bundle(url: appURL) {
-                if let bundleName = bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String {
+                if let bundleName = bundle.object(forInfoDictionaryKey: "CFBundleDisplayName")
+                    as? String
+                {
                     displayName = bundleName
-                } else if let bundleName = bundle.object(forInfoDictionaryKey: "CFBundleName") as? String {
+                } else if let bundleName = bundle.object(forInfoDictionaryKey: "CFBundleName")
+                    as? String
+                {
                     displayName = bundleName
                 } else {
                     displayName = appName
@@ -97,7 +103,7 @@ class AppUtility {
                     if appNameWithoutExtension == appName {
                         let appURL = URL(fileURLWithPath: "\(applicationsDirectory)/\(appFile)")
                         if let bundle = Bundle(url: appURL),
-                           let bundleID = bundle.bundleIdentifier
+                            let bundleID = bundle.bundleIdentifier
                         {
                             return bundleID
                         }
@@ -122,4 +128,46 @@ class AppUtility {
     func clearCache() {
         appInfoCache.removeAll()
     }
+
+    public static func getBundleIdentifierForPID(_ pid: pid_t) -> String? {
+        // 根据 PID 获取 NSRunningApplication 实例
+        if let runningApp = NSRunningApplication(processIdentifier: pid) {
+            // 获取 Bundle Identifier
+            return runningApp.bundleIdentifier
+        }
+        return nil
+    }
+
+    public static func getBundleIdentifierFromAuditToken(_ auditToken: audit_token_t) -> String? {
+        // 使用 Security 框架的 API 获取 Bundle Identifier
+        var auditToken = auditToken
+        let attributes = [
+            kSecGuestAttributeAudit: Data(
+                bytes: &auditToken, count: MemoryLayout<audit_token_t>.size)
+        ]
+
+        var code: SecCode?
+        var status = SecCodeCopyGuestWithAttributes(nil, attributes as CFDictionary, [], &code)
+
+        guard status == errSecSuccess, let code = code else {
+            print("Failed to get SecCode: \(status)")
+            return nil
+        }
+
+        var info: CFDictionary?
+        status = SecCodeCopySigningInformation(code as! SecStaticCode, [], &info)
+
+        guard status == errSecSuccess, let info = info as NSDictionary? else {
+            print("Failed to get signing information: \(status)")
+            return nil
+        }
+
+        // 从 signing information 中提取 Bundle Identifier
+        if let bundleID = info[kSecCodeInfoIdentifier as String] as? String {
+            return bundleID
+        }
+
+        return nil
+    }
+
 }
