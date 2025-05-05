@@ -174,18 +174,51 @@ class Reporter {
 	private func monitor() {
 		ApplicationMonitor.shared.startMouseMonitoring()
 		ApplicationMonitor.shared.startWindowFocusMonitoring()
-		ApplicationMonitor.shared.onWindowFocusChanged = { [unowned self] info in
-			if PreferencesDataModel.shared.focusReport.value {
+		ApplicationMonitor.shared.onWindowFocusChanged = { [weak self] info in
+			guard let self = self else { return }
+			if PreferencesDataModel.shared.focusReport.value
+				&& PreferencesDataModel.shared.enabledTypes.value.types.contains(.process)
+			{
 				self.prepareSend(windowInfo: info)
 			}
 		}
 
+		MediaInfoManager.startMonitoringPlaybackChanges { [weak self] mediaInfo in
+			guard let self = self else { return }
+			if PreferencesDataModel.shared.enabledTypes.value.types.contains(.media) {
+				self.prepareSend(
+					windowInfo: ApplicationMonitor.shared.getFocusedWindowInfo(),
+					mediaInfo: mediaInfo
+				)
+			}
+		}
 		statusItemManager.toggleStatusItemIcon(.syncing)
 	}
 
 	private var reporterInitializedTime: Date
 
-	private func prepareSend(windowInfo: FocusedWindowInfo) {
+	private func prepareSend(
+		windowInfo optionalWindowInfo: FocusedWindowInfo?,
+		mediaInfo optionalMediaInfo: MediaInfo? = nil
+	) {
+
+		var windowInfo: FocusedWindowInfo!
+		if let optionalWindowInfo = optionalWindowInfo {
+			windowInfo = optionalWindowInfo
+		} else {
+			windowInfo = ApplicationMonitor.shared.getFocusedWindowInfo()
+			if windowInfo == nil {
+				return
+			}
+		}
+
+		var mediaInfo: MediaInfo?
+		if let optionalMediaInfo = optionalMediaInfo {
+			mediaInfo = optionalMediaInfo
+		} else {
+			mediaInfo = MediaInfoManager.getMediaInfo()
+		}
+
 		let appName = windowInfo.appName
 		let now = Date()
 		// Ignore the first 2 seconds after initialization to wait for the setting synchronization to complete
@@ -205,8 +238,6 @@ class Reporter {
 			statusItemManager.toggleStatusItemIcon(.syncing)
 		}
 
-		let mediaInfo = MediaInfoManager.getMediaInfo()
-
 		var dataModel = ReportModel(
 			windowInfo: nil,
 			integrations: [],
@@ -218,8 +249,8 @@ class Reporter {
 			// Filter media name
 
 			if !cachedFilteredMediaAppNames.contains(mediaInfo.processName),
-			   !shouldIgnoreArtistNull
-			   || (mediaInfo.artist != nil && !mediaInfo.artist!.isEmpty)
+				!shouldIgnoreArtistNull
+					|| (mediaInfo.artist != nil && !mediaInfo.artist!.isEmpty)
 			{
 				dataModel.setMediaInfo(mediaInfo)
 			}
@@ -254,8 +285,8 @@ class Reporter {
 
 		let interval = PreferencesDataModel.shared.sendInterval.value
 		timer = Timer.scheduledTimer(
-			withTimeInterval: TimeInterval(interval.rawValue), repeats: true)
-		{ [weak self] _ in
+			withTimeInterval: TimeInterval(interval.rawValue), repeats: true
+		) { [weak self] _ in
 			Task { @MainActor in
 				guard let self = self else { return }
 				if let info = ApplicationMonitor.shared.getFocusedWindowInfo() {
@@ -284,7 +315,7 @@ class Reporter {
 		let extensions: [ReporterExtension] = [
 			MixSpaceReporterExtension(),
 			S3ReporterExtension(),
-			SlackReporterExtension()
+			SlackReporterExtension(),
 		]
 
 		for ext in extensions {
@@ -363,7 +394,8 @@ extension Reporter {
 		let d3 = Observable.combineLatest(
 			preferences.mixSpaceIntegration,
 			preferences.s3Integration,
-			preferences.slackIntegration).subscribe { [weak self] _ in
+			preferences.slackIntegration
+		).subscribe { [weak self] _ in
 			guard let self = self else { return }
 			Task {
 				await self.updateExtensions()

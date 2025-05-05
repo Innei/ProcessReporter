@@ -3,6 +3,7 @@
 // Created by Innei on 2025/4/11.
 
 import AppKit
+import Combine
 import Foundation
 
 // Recreating the MRContent classes in Swift
@@ -33,6 +34,78 @@ typealias MRMediaRemoteGetNowPlayingApplicationPIDFunction = @convention(c) (
 ) -> Void
 
 public class MediaInfoManager: NSObject {
+  // Notification name for media playing state changes
+  private static let playingStateChangedNotificationName =
+    "kMRMediaRemoteNowPlayingApplicationIsPlayingDidChangeNotification"
+  private static let applicationChangedNotificationName =
+    "kMRMediaRemoteNowPlayingApplicationDidChangeNotification"
+  private static let infoChangedNotificationName =
+    "kMRMediaRemoteNowPlayingInfoDidChangeNotification"
+
+  // Callback for when playback state changes
+  public typealias PlaybackStateChangedCallback = (MediaInfo) -> Void
+
+  // Store the callback
+  private static var playbackStateChangedCallback: PlaybackStateChangedCallback?
+
+  // Observer for the notification
+  private static var observer: Any?
+
+  // Static initializer to set up the notification center
+  private static let setupOnce: Void = {
+    loadMediaRemoteFramework()
+  }()
+  private static var cancellables = Set<AnyCancellable>()
+  private static var mediaInfo: MediaInfo?
+
+  // Load MediaRemote framework and register for notifications
+  private static func loadMediaRemoteFramework() {
+    let url = URL(fileURLWithPath: "/System/Library/PrivateFrameworks/MediaRemote.framework")
+    guard CFBundleCreate(kCFAllocatorDefault, url as CFURL) != nil else {
+      print("Failed to load MediaRemote framework")
+      return
+    }
+
+    for name in [
+      playingStateChangedNotificationName, applicationChangedNotificationName,
+      infoChangedNotificationName,
+    ] {
+
+      NotificationCenter.default.publisher(for: Notification.Name(name)).sink { _ in
+        if let callback = MediaInfoManager.playbackStateChangedCallback {
+          DispatchQueue.main.async {
+            guard let mediaInfo = MediaInfoManager.getMediaInfo() else {
+              return
+            }
+            callback(mediaInfo)
+          }
+        }
+      }.store(in: &cancellables)
+    }
+  }
+
+  // Setup the notification observer
+  public static func startMonitoringPlaybackChanges(
+    callback: @escaping PlaybackStateChangedCallback
+  ) {
+    // Make sure framework is loaded
+    _ = setupOnce
+
+    // Remove existing observer if there is one
+    if let observer = observer {
+      NotificationCenter.default.removeObserver(observer)
+    }
+
+    // Store the callback
+    playbackStateChangedCallback = callback
+  }
+
+  // Stop monitoring playback changes
+  public static func stopMonitoringPlaybackChanges() {
+    cancellables.removeAll()
+    playbackStateChangedCallback = nil
+  }
+
   public static func getMediaInfo() -> MediaInfo? {
     if let nowPlayingInfo = getNowPlayingInfo() {
       let name = nowPlayingInfo["name"] as? String
@@ -53,7 +126,8 @@ public class MediaInfoManager: NSObject {
         name: name, artist: artist, album: album, image: artworkData, duration: duration,
         elapsedTime: elapsedTime, processID: processID, processName: processName,
         executablePath: executablePath, playing: playing,
-        applicationIdentifier: bundleID)
+        applicationIdentifier: bundleID
+      )
     }
     return nil
   }
@@ -73,17 +147,22 @@ public class MediaInfoManager: NSObject {
       // Get function pointers from the framework
       let getMRMediaRemoteGetNowPlayingInfo = unsafeBitCast(
         CFBundleGetFunctionPointerForName(bundle, "MRMediaRemoteGetNowPlayingInfo" as CFString),
-        to: MRMediaRemoteGetNowPlayingInfoFunction.self)
+        to: MRMediaRemoteGetNowPlayingInfoFunction.self
+      )
 
       let getMRMediaRemoteGetNowPlayingApplicationIsPlaying = unsafeBitCast(
         CFBundleGetFunctionPointerForName(
-          bundle, "MRMediaRemoteGetNowPlayingApplicationIsPlaying" as CFString),
-        to: MRMediaRemoteGetNowPlayingApplicationIsPlayingFunction.self)
+          bundle, "MRMediaRemoteGetNowPlayingApplicationIsPlaying" as CFString
+        ),
+        to: MRMediaRemoteGetNowPlayingApplicationIsPlayingFunction.self
+      )
 
       let getMRMediaRemoteGetNowPlayingApplicationPID = unsafeBitCast(
         CFBundleGetFunctionPointerForName(
-          bundle, "MRMediaRemoteGetNowPlayingApplicationPID" as CFString),
-        to: MRMediaRemoteGetNowPlayingApplicationPIDFunction.self)
+          bundle, "MRMediaRemoteGetNowPlayingApplicationPID" as CFString
+        ),
+        to: MRMediaRemoteGetNowPlayingApplicationPIDFunction.self
+      )
 
       // Get playing status
       var isPlaying = false

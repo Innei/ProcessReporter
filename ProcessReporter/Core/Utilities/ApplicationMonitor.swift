@@ -43,7 +43,7 @@ class ApplicationMonitor {
                     NSWorkspace.shared.open(
                         URL(
                             string:
-                            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+                                "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
                         )!)
                 }
             }
@@ -58,14 +58,16 @@ class ApplicationMonitor {
         let appElement = AXUIElementCreateApplication(pid)
 
         var mainWindow: CFTypeRef?
-        let mainWindowError = AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &mainWindow)
+        let mainWindowError = AXUIElementCopyAttributeValue(
+            appElement, kAXMainWindowAttribute as CFString, &mainWindow)
         let window = mainWindow
         guard mainWindowError == .success else {
             return nil
         }
 
         var title: CFTypeRef?
-        let titleError = AXUIElementCopyAttributeValue(window as! AXUIElement, kAXTitleAttribute as CFString, &title)
+        let titleError = AXUIElementCopyAttributeValue(
+            window as! AXUIElement, kAXTitleAttribute as CFString, &title)
         guard titleError == .success, let titleString = title as? String else {
             return nil
         }
@@ -75,7 +77,8 @@ class ApplicationMonitor {
 
     func getFocusedWindowInfo() -> FocusedWindowInfo? {
         guard isAccessibilityEnabled() else {
-            checkAndRequestAccessibilityPermissions()
+            ToastManager.shared.error(
+                "Accessibility permissions are required to monitor window changes.")
             return nil
         }
 
@@ -83,7 +86,7 @@ class ApplicationMonitor {
             return nil
         }
         let applicationIdentifier = app.bundleIdentifier ?? ""
-        
+
         if IgnoreSystemApplication.contains(applicationIdentifier) {
             return nil
         }
@@ -143,7 +146,7 @@ class ApplicationMonitor {
             queue: .main
         ) { [weak self] _ in
             guard let self = self,
-                  let windowInfo = self.getFocusedWindowInfo()
+                let windowInfo = self.getFocusedWindowInfo()
             else {
                 return
             }
