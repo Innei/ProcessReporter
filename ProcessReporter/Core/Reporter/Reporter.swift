@@ -22,12 +22,36 @@ class Reporter {
 	private var mapping = [String: ReporterOptions]()
 	private var statusItemManager = ReporterStatusItemManager()
 
+	// Add reporter extensions array
+	private var reporterExtensions: [ReporterExtension] = []
+
 	private var cachedFilteredProcessAppNames = [String]()
 	private var cachedFilteredMediaAppNames = [String]()
 	private var disposers: [Disposable] = []
 
 	// Mapping cache
 	private var mappingCache: [PreferencesDataModel.Mapping] = []
+
+	// Register a reporter extension
+	public func registerExtension(_ extension: ReporterExtension) {
+		reporterExtensions.append(`extension`)
+		if `extension`.isEnabled {
+			Task {
+				await `extension`.register(to: self)
+			}
+		}
+	}
+
+	// Update the status of all extensions
+	public func updateExtensions() async {
+		for ext in reporterExtensions {
+			if ext.isEnabled {
+				await ext.register(to: self)
+			} else {
+				await ext.unregister(from: self)
+			}
+		}
+	}
 
 	public func register(name: String, options: ReporterOptions) {
 		mapping[name] = options
@@ -248,7 +272,24 @@ class Reporter {
 
 	init() {
 		reporterInitializedTime = Date()
+		
+		// Register all available extensions
+		initializeExtensions()
+		
 		subscribeSettingsChanged()
+	}
+
+	private func initializeExtensions() {
+		// Register all reporter extensions
+		let extensions: [ReporterExtension] = [
+			MixSpaceReporterExtension(),
+			S3ReporterExtension(),
+			SlackReporterExtension()
+		]
+		
+		for ext in extensions {
+			registerExtension(ext)
+		}
 	}
 
 	deinit {
@@ -274,13 +315,14 @@ extension Reporter {
 
 	private func subscribeFilterSettingsChanged() {
 		let d1 = PreferencesDataModel.filteredProcesses.subscribe { [weak self] appIds in
+			self?.cachedFilteredProcessAppNames.removeAll()
 			for appId in appIds {
 				let appInfo = AppUtility.shared.getAppInfo(for: appId)
 				self?.cachedFilteredProcessAppNames.append(appInfo.displayName)
 			}
 		}
 		let d2 = PreferencesDataModel.filteredMediaProcesses.subscribe { [weak self] appIds in
-			self?.cachedFilteredMediaAppNames = appIds
+			self?.cachedFilteredMediaAppNames.removeAll()
 			for appId in appIds {
 				let appInfo = AppUtility.shared.getAppInfo(for: appId)
 				self?.cachedFilteredMediaAppNames.append(appInfo.displayName)
@@ -308,16 +350,7 @@ extension Reporter {
 			}
 		}
 
-		let d2 = preferences.mixSpaceIntegration.subscribe { event in
-			guard let config = event.element else { return }
-			if config.isEnabled {
-				self.registerMixSpace()
-			} else {
-				self.unregisterMixSpace()
-			}
-		}
-
-		let d3 = preferences.sendInterval.subscribe { [weak self] _ in
+		let d2 = preferences.sendInterval.subscribe { [weak self] _ in
 			guard let self = self else { return }
 			if preferences.isEnabled.value {
 				self.setupTimer()
@@ -326,29 +359,18 @@ extension Reporter {
 			}
 		}
 
-		let d4 = preferences.s3Integration.subscribe { [weak self] event in
+		// Subscribe to extension configuration changes
+		let d3 = Observable.combineLatest(
+			preferences.mixSpaceIntegration,
+			preferences.s3Integration,
+			preferences.slackIntegration
+		).subscribe { [weak self] _ in
 			guard let self = self else { return }
-
-			if let config = event.element {
-				if config.isEnabled {
-					self.registerS3()
-				} else {
-					self.unregisterS3()
-				}
+			Task {
+				await self.updateExtensions()
 			}
 		}
 
-		let d5 = preferences.slackIntegration.subscribe { [weak self] event in
-			guard let self = self else { return }
-			if let config = event.element {
-				if config.isEnabled {
-					self.registerSlack()
-				} else {
-					self.unregisterSlack()
-				}
-			}
-		}
-
-		disposers.append(contentsOf: [d1, d2, d3, d4, d5])
+		disposers.append(contentsOf: [d1, d2, d3])
 	}
 }

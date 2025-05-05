@@ -8,59 +8,55 @@
 import Foundation
 import SwiftData
 
-private let name = "S3"
+class S3ReporterExtension: ReporterExtension {
+    var name: String = "S3"
 
-extension Reporter {
-    func registerS3() {
-        register(
-            name: name,
-            options: ReporterOptions(
-                onSend: { data in
-                    if !PreferencesDataModel.shared.s3Integration.value.isEnabled {
-                        return .failure(.ignored)
-                    }
-
-                    guard let nsImage = data.processInfoRaw?.icon, let iconData = nsImage.data,
-                          let applicationIdentifier = data.processInfoRaw?.applicationIdentifier
-
-                    else {
-                        return .failure(.cancelled(message: "S3: No icon data"))
-                    }
-
-                    let icon = IconModel.findIcon(for: applicationIdentifier)
-                    if icon != nil {
-                        return .success(())
-                    }
-
-                    guard let appName = data.processName, !appName.isEmpty,
-                          let url = try? await S3Uploader.uploadIconToS3(
-                              iconData, appName: appName
-                          )
-                    else {
-                        return .failure(.networkError("Upload failed"))
-                    }
-
-                    let iconModel = IconModel(
-                        name: appName, url: url,
-                        applicationIdentifier: applicationIdentifier
-                    )
-                    if let context = Database.shared.ctx {
-                        context.insert(iconModel)
-                        do {
-                            try context.save()
-                        } catch {
-                            print("Failed to save icon model: \(error)")
-                        }
-                    }
-
-                    return .success(())
-                }
-            )
-        )
+    var isEnabled: Bool {
+        return PreferencesDataModel.shared.s3Integration.value.isEnabled
     }
 
-    func unregisterS3() {
-        unregister(name: name)
+    func createReporterOptions() -> ReporterOptions {
+        return ReporterOptions(
+            onSend: { data in
+                if !PreferencesDataModel.shared.s3Integration.value.isEnabled {
+                    return .failure(.ignored)
+                }
+
+                guard let nsImage = data.processInfoRaw?.icon, let iconData = nsImage.data,
+                    let applicationIdentifier = data.processInfoRaw?.applicationIdentifier
+                else {
+                    return .failure(.cancelled(message: "S3: No icon data"))
+                }
+
+                let icon = await IconModel.findIcon(for: applicationIdentifier)
+                if icon != nil {
+                    return .success(())
+                }
+
+                guard let appName = data.processName, !appName.isEmpty,
+                    let url = try? await S3Uploader.uploadIconToS3(
+                        iconData, appName: appName
+                    )
+                else {
+                    return .failure(.networkError("Upload failed"))
+                }
+
+                let iconModel = IconModel(
+                    name: appName, url: url,
+                    applicationIdentifier: applicationIdentifier
+                )
+                if let context = await Database.shared.ctx {
+                    context.insert(iconModel)
+                    do {
+                        try context.save()
+                    } catch {
+                        print("Failed to save icon model: \(error)")
+                    }
+                }
+
+                return .success(())
+            }
+        )
     }
 }
 

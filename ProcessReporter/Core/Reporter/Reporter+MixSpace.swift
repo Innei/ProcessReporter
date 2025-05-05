@@ -55,13 +55,16 @@ private func sendMixSpaceRequest(data: ReportModel) async -> Result<Void, Report
     var description: String?
 
     if let processName = data.processName {
-        if descriptionDictionary.keys.contains(processName), let title = data.processInfoRaw?.title, let prefix = descriptionDictionary[processName] {
+        if descriptionDictionary.keys.contains(processName), let title = data.processInfoRaw?.title,
+            let prefix = descriptionDictionary[processName]
+        {
             description = prefix + "\n" + title
         }
     }
 
     let requestPayload = MixSpaceDataPayload(
-        process: .init(iconBase64: nil, iconUrl: iconUrl, description: description, name: data.processName),
+        process: .init(
+            iconBase64: nil, iconUrl: iconUrl, description: description, name: data.processName),
         media: .init(
             artist: data.artist,
             title: data.mediaName,
@@ -73,7 +76,7 @@ private func sendMixSpaceRequest(data: ReportModel) async -> Result<Void, Report
     )
 
     let headers: HTTPHeaders = [
-        "Content-Type": "application/json",
+        "Content-Type": "application/json"
     ]
 
     do {
@@ -97,24 +100,22 @@ private func sendMixSpaceRequest(data: ReportModel) async -> Result<Void, Report
     }
 }
 
-private let name = "MixSpace"
-extension Reporter {
-    func registerMixSpace() {
-        register(
-            name: name,
-            options: ReporterOptions(
-                onSend: { data in
-                    if !PreferencesDataModel.shared.mixSpaceIntegration.value.isEnabled {
-                        return .failure(.ignored)
-                    }
+class MixSpaceReporterExtension: ReporterExtension {
+    var name: String = "MixSpace"
 
-                    return await sendMixSpaceRequest(data: data)
-                }
-            )
-        )
+    var isEnabled: Bool {
+        return PreferencesDataModel.shared.mixSpaceIntegration.value.isEnabled
     }
 
-    func unregisterMixSpace() {
-        unregister(name: name)
+    func createReporterOptions() -> ReporterOptions {
+        return ReporterOptions(
+            onSend: { data in
+                if !PreferencesDataModel.shared.mixSpaceIntegration.value.isEnabled {
+                    return .failure(.ignored)
+                }
+
+                return await sendMixSpaceRequest(data: data)
+            }
+        )
     }
 }

@@ -163,7 +163,7 @@ class PreferencesIntegrationSlackView: IntegrationView {
 
                 stackView.addArrangedSubview(globalCustomEmojiInput)
                 stackView.addArrangedSubview(emojiPickerButton)
-                emojiPickerButton.snp.makeConstraints { make in
+				emojiPickerButton.snp.remakeConstraints { make in
                     make.right.equalTo(globalCustomEmojiInput.snp.right).inset(4)
                     make.verticalEdges.equalTo(globalCustomEmojiInput)
                     make.height.equalTo(globalCustomEmojiInput)

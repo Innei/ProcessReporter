@@ -18,8 +18,8 @@ private struct ProfileData: Codable {
 
 private let slackRatelimiter = Ratelimiter(
 	capacity: 1,
-	refillRate: 10.0 / 60.0, // 每分钟十个请求
-	minimumInterval: 10 // 最小间隔 10 秒
+	refillRate: 10.0 / 60.0,  // 每分钟十个请求
+	minimumInterval: 10  // 最小间隔 10 秒
 )
 
 private let allowedTemplateVariants: Set<String> = [
@@ -31,11 +31,15 @@ private let allowedTemplateVariants: Set<String> = [
 	"{media_name}",
 ]
 
-private let name = "Slack"
+class SlackReporterExtension: ReporterExtension {
+	var name: String = "Slack"
 
-extension Reporter {
-	func registerSlack() {
-		let options: ReporterOptions = .init { data in
+	var isEnabled: Bool {
+		return PreferencesDataModel.shared.slackIntegration.value.isEnabled
+	}
+
+	func createReporterOptions() -> ReporterOptions {
+		return ReporterOptions { data in
 			let slackConfig = PreferencesDataModel.shared.slackIntegration.value
 			guard slackConfig.isEnabled else {
 				return .failure(.ignored)
@@ -87,8 +91,9 @@ extension Reporter {
 			let conditions = slackConfig.customEmojiConditionList.getConditions()
 			if !conditions.isEmpty {
 				for condition in conditions {
-					if let parsedCondition = EmojiConditionList.EmojiCondition.parseWhenString(for: condition.when),
-					   !condition.emoji.isEmpty
+					if let parsedCondition = EmojiConditionList.EmojiCondition.parseWhenString(
+						for: condition.when),
+						!condition.emoji.isEmpty
 					{
 						let matches = self.checkConditionMatch(
 							variable: parsedCondition.variable,
@@ -130,10 +135,11 @@ extension Reporter {
 					method: .post,
 					parameters: ["profile": profile],
 					encoder: JSONParameterEncoder.default,
-					headers: headers)
-					.validate()
-					.serializingData()
-					.value
+					headers: headers
+				)
+				.validate()
+				.serializingData()
+				.value
 
 			} catch {
 				NSLog(
@@ -144,7 +150,6 @@ extension Reporter {
 
 			return .success(())
 		}
-		self.register(name: name, options: options)
 	}
 
 	private func checkConditionMatch(
@@ -187,9 +192,5 @@ extension Reporter {
 		case .contains:
 			return actualValue.contains(value)
 		}
-	}
-
-	func unregisterSlack() {
-		self.unregister(name: name)
 	}
 }
