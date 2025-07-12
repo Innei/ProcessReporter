@@ -12,7 +12,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // 初始设置为 accessory 模式（不显示 Dock 图标）
         NSApp.setActivationPolicy(.accessory)
-        
+
         // Setup sleep/wake notifications for cache cleanup
         setupSleepWakeNotifications()
 
@@ -21,8 +21,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.showSettings()
             }
         }
+        // Check for media-control installation after a short delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            MediaControlInstallationHelper.checkAndPromptInstallation()
+        }
+
         #if DEBUG
-        showSettings()
+            showSettings()
         #endif
     }
 
@@ -39,11 +44,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        return false // Keep the app running even after the window is closed
+        return false  // Keep the app running even after the window is closed
     }
-    
+
     // MARK: - Sleep/Wake Notifications for Cache Cleanup
-    
+
     private func setupSleepWakeNotifications() {
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
@@ -51,7 +56,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSWorkspace.willSleepNotification,
             object: nil
         )
-        
+
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
             selector: #selector(didWake),
@@ -59,56 +64,56 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
     }
-    
+
     @objc private func willSleep() {
         print("System will sleep - cleaning up caches...")
         cleanupCachesBeforeSleep()
     }
-    
+
     @objc private func didWake() {
         print("System did wake - reinitializing components...")
         reinitializeAfterWake()
     }
-    
+
     private func cleanupCachesBeforeSleep() {
         // Clean up app info cache with icons (can be memory-heavy)
         AppUtility.shared.clearCache()
-        
+
         // Clean up reporter caches
         Task { @MainActor in
             if let reporter = reporter {
                 reporter.clearCaches()
             }
         }
-        
+
         // Stop media monitoring to free resources
         MediaInfoManager.stopMonitoringPlaybackChanges()
-        
+
         // Save any pending database changes
         Task { @MainActor in
             if let context = await Database.shared.mainContext {
                 try? context.save()
             }
         }
-        
+
         print("Cache cleanup completed before sleep")
     }
-    
+
     private func reinitializeAfterWake() {
         // Restart media monitoring after wake
         Task {
-            try? await Task.sleep(nanoseconds: 2_000_000_000) // Wait 2 seconds for system to stabilize
-            
+            try? await Task.sleep(nanoseconds: 2_000_000_000)  // Wait 2 seconds for system to stabilize
+
             // We need to provide a callback if restarting media monitoring
             // Since we're just waking up, we can use an empty callback for now
             MediaInfoManager.startMonitoringPlaybackChanges { _ in
                 // Media info changed after wake - handled by existing reporters
             }
         }
-        
+
         print("Components reinitialized after wake")
     }
-    
+
     deinit {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
     }

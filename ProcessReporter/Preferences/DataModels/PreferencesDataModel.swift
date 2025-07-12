@@ -26,6 +26,7 @@ class PreferencesDataModel {
 			"ignoreNullArtist": PreferencesDataModel.ignoreNullArtist.value,
 			"filteredProcesses": PreferencesDataModel.filteredProcesses.value,
 			"filteredMediaProcesses": PreferencesDataModel.filteredMediaProcesses.value,
+			"hasShownMediaControlInstallPrompt": PreferencesDataModel.hasShownMediaControlInstallPrompt.value,
 
 			"mappingList": PreferencesDataModel.mappingList.value.toDictionary(),
 		]
@@ -86,6 +87,9 @@ class PreferencesDataModel {
 			}
 			if let filteredMediaProcesses = dictionary["filteredMediaProcesses"] as? [String] {
 				PreferencesDataModel.filteredMediaProcesses.accept(filteredMediaProcesses)
+			}
+			if let hasShownMediaControlInstallPrompt = dictionary["hasShownMediaControlInstallPrompt"] as? Bool {
+				PreferencesDataModel.hasShownMediaControlInstallPrompt.accept(hasShownMediaControlInstallPrompt)
 			}
 
 			if let mapping = dictionary["mappingList"] as? [String: Any] {
