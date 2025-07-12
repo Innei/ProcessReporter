@@ -50,6 +50,11 @@ class ReporterStatusItemManager: NSObject {
 		fatalError("init(coder:) has not been implemented")
 	}
 
+	deinit {
+		updateTimer?.invalidate()
+		updateTimer = nil
+	}
+
 	private func synchronizeUI() {
 		let preferences = PreferencesDataModel.shared
 		enabledItem.state = preferences.isEnabled.value ? .on : .off
@@ -206,14 +211,17 @@ class ReporterStatusItemManager: NSObject {
 
 				// First line: Bold font
 				let firstLineRange = NSRange(location: 0, length: firstLine.count)
-				attributedString.addAttribute(.font, value: NSFont.systemFont(ofSize: 16, weight: .medium), range: firstLineRange)
+				attributedString.addAttribute(
+					.font, value: NSFont.systemFont(ofSize: 16, weight: .medium), range: firstLineRange)
 
 				// Second line: Secondary color
 				let secondLineRange = NSRange(location: firstLine.count, length: secondLine.count)
-				attributedString.addAttribute(.foregroundColor, value: NSColor.secondaryLabelColor, range: secondLineRange)
+				attributedString.addAttribute(
+					.foregroundColor, value: NSColor.secondaryLabelColor, range: secondLineRange)
 
 				currentMediaNameItem.attributedTitle = attributedString
-				currentMediaNameItem.image = NSImage(data: data, size: .init(width: 40, height: 40))?.withRoundedCorners(radius: 8)
+				currentMediaNameItem.image = NSImage(data: data, size: .init(width: 40, height: 40))?
+					.withRoundedCorners(radius: 8)
 			}
 
 		} else {
@@ -346,7 +354,7 @@ extension ReporterStatusItemManager {
 			stackView.addArrangedSubview(debugLabel)
 
 			stackView.gestureRecognizers = [
-				NSClickGestureRecognizer(target: self, action: #selector(debugUI)),
+				NSClickGestureRecognizer(target: self, action: #selector(debugUI))
 			]
 
 			// 确保视图被布局后更新 tracking areas

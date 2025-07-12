@@ -103,17 +103,21 @@ class CLIMediaInfoProvider: MediaInfoProvider {
       do {
         try process.run()
         
-        // Set up timeout to prevent hanging
-        let timeoutTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: false) { _ in
+        // Set up timeout using DispatchSourceTimer (works in background queues)
+        let timeoutTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
+        timeoutTimer.schedule(deadline: .now() + 3.0)
+        timeoutTimer.setEventHandler {
           if process.isRunning {
             process.terminate()
             completion(nil)
           }
+          timeoutTimer.cancel()
         }
+        timeoutTimer.resume()
         
         // Use terminationHandler for async completion
         process.terminationHandler = { process in
-          timeoutTimer.invalidate()
+          timeoutTimer.cancel()
           
           guard process.terminationStatus == 0 else {
             print("mediaremote-adapter failed with status: \(process.terminationStatus)")

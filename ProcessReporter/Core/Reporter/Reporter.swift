@@ -33,6 +33,13 @@ class Reporter {
 	// Mapping cache
 	private var mappingCache: [PreferencesDataModel.Mapping] = []
 
+	// Clear all caches for memory cleanup
+	public func clearCaches() {
+		cachedFilteredProcessAppNames.removeAll()
+		cachedFilteredMediaAppNames.removeAll()
+		mappingCache.removeAll()
+	}
+
 	// Register a reporter extension
 	public func registerExtension(_ extension: ReporterExtension) {
 		reporterExtensions.append(`extension`)
