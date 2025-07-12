@@ -187,15 +187,17 @@ class PreferencesS3IconsViewController: NSViewController, SettingWindowProtocol 
     }
 
     private func startObservingChanges() {
-        guard let context = Database.shared.ctx else { return }
-
-        // Observe ModelContext changes
-        observer = NotificationCenter.default.addObserver(
-            forName: ModelContext.didSave,
-            object: context,
-            queue: .main)
-        { [weak self] _ in
-            self?.fetchData()
+        Task { @MainActor in
+            guard let context = await Database.shared.mainContext else { return }
+            
+            // Observe ModelContext changes
+            observer = NotificationCenter.default.addObserver(
+                forName: ModelContext.didSave,
+                object: context,
+                queue: .main)
+            { [weak self] _ in
+                self?.fetchData()
+            }
         }
     }
 
@@ -206,25 +208,27 @@ class PreferencesS3IconsViewController: NSViewController, SettingWindowProtocol 
     }
 
     private func fetchData() {
-        guard let context = Database.shared.ctx else { return }
-
-        let descriptor = FetchDescriptor<IconModel>(
-            sortBy: [SortDescriptor(\.name, order: .forward)]
-        )
-
-        do {
-            allResults = try context.fetch(descriptor)
-
-            // Filter results by search text
-            if let searchText = searchField?.stringValue, !searchText.isEmpty {
-                filterResultsWithSearchText(searchText)
-            } else {
-                fetchedResults = allResults
+        Task { @MainActor in
+            guard let context = await Database.shared.mainContext else { return }
+            
+            let descriptor = FetchDescriptor<IconModel>(
+                sortBy: [SortDescriptor(\.name, order: .forward)]
+            )
+            
+            do {
+                allResults = try context.fetch(descriptor)
+                
+                // Filter results by search text
+                if let searchText = searchField?.stringValue, !searchText.isEmpty {
+                    filterResultsWithSearchText(searchText)
+                } else {
+                    fetchedResults = allResults
+                }
+                
+                tableView.reloadData()
+            } catch {
+                print("Failed to fetch icons: \(error)")
             }
-
-            tableView.reloadData()
-        } catch {
-            print("Failed to fetch icons: \(error)")
         }
     }
 
@@ -351,15 +355,17 @@ class PreferencesS3IconsViewController: NSViewController, SettingWindowProtocol 
         alert.addButton(withTitle: "Cancel")
 
         if alert.runModal() == .alertFirstButtonReturn {
-            guard let context = Database.shared.ctx else { return }
-
-            context.delete(model)
-
-            do {
-                try context.save()
-                fetchData()
-            } catch {
-                print("Failed to delete icon: \(error)")
+            Task { @MainActor in
+                guard let context = await Database.shared.mainContext else { return }
+                
+                context.delete(model)
+                
+                do {
+                    try context.save()
+                    fetchData()
+                } catch {
+                    print("Failed to delete icon: \(error)")
+                }
             }
         }
     }
@@ -409,46 +415,48 @@ extension PreferencesS3IconsViewController: NSTableViewDataSource {
         _ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]
     ) {
         guard let sortDescriptor = tableView.sortDescriptors.first else { return }
-
-        guard let context = Database.shared.ctx else { return }
-
-        let keyPath = sortDescriptor.key!
-        let ascending = sortDescriptor.ascending
-
-        var fetchDescriptor: FetchDescriptor<IconModel>
-
-        switch keyPath {
-        case "name":
-            fetchDescriptor = FetchDescriptor<IconModel>(
-                sortBy: [SortDescriptor(\.name, order: ascending ? .forward : .reverse)]
-            )
-        case "applicationIdentifier":
-            fetchDescriptor = FetchDescriptor<IconModel>(
-                sortBy: [SortDescriptor(\.applicationIdentifier, order: ascending ? .forward : .reverse)]
-            )
-        case "url":
-            fetchDescriptor = FetchDescriptor<IconModel>(
-                sortBy: [SortDescriptor(\.url, order: ascending ? .forward : .reverse)]
-            )
-        default:
-            fetchDescriptor = FetchDescriptor<IconModel>(
-                sortBy: [SortDescriptor(\.name, order: .forward)]
-            )
-        }
-
-        do {
-            allResults = try context.fetch(fetchDescriptor)
-
-            // Maintain search filter
-            if let searchText = searchField?.stringValue, !searchText.isEmpty {
-                filterResultsWithSearchText(searchText)
-            } else {
-                fetchedResults = allResults
+        
+        Task { @MainActor in
+            guard let context = await Database.shared.mainContext else { return }
+            
+            let keyPath = sortDescriptor.key!
+            let ascending = sortDescriptor.ascending
+            
+            var fetchDescriptor: FetchDescriptor<IconModel>
+            
+            switch keyPath {
+            case "name":
+                fetchDescriptor = FetchDescriptor<IconModel>(
+                    sortBy: [SortDescriptor(\.name, order: ascending ? .forward : .reverse)]
+                )
+            case "applicationIdentifier":
+                fetchDescriptor = FetchDescriptor<IconModel>(
+                    sortBy: [SortDescriptor(\.applicationIdentifier, order: ascending ? .forward : .reverse)]
+                )
+            case "url":
+                fetchDescriptor = FetchDescriptor<IconModel>(
+                    sortBy: [SortDescriptor(\.url, order: ascending ? .forward : .reverse)]
+                )
+            default:
+                fetchDescriptor = FetchDescriptor<IconModel>(
+                    sortBy: [SortDescriptor(\.name, order: .forward)]
+                )
             }
-
-            tableView.reloadData()
-        } catch {
-            print("Failed to fetch icons: \(error)")
+            
+            do {
+                allResults = try context.fetch(fetchDescriptor)
+                
+                // Maintain search filter
+                if let searchText = searchField?.stringValue, !searchText.isEmpty {
+                    filterResultsWithSearchText(searchText)
+                } else {
+                    fetchedResults = allResults
+                }
+                
+                tableView.reloadData()
+            } catch {
+                print("Failed to fetch icons: \(error)")
+            }
         }
     }
 }

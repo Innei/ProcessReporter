@@ -12,58 +12,71 @@ import SwiftData
 class ReportModel {
     @Attribute(.unique)
     var id: UUID
-
+    
     var processName: String?
+    var windowTitle: String?
     var timeStamp: Date
-
+    
     // MARK: - Media Info
-
+    
     var artist: String?
     var mediaName: String?
     var mediaProcessName: String?
     var mediaDuration: Double?
     var mediaElapsedTime: Double?
-
+    
+    // Store as Data instead of base64 string for efficiency
+    var mediaImageData: Data?
+    
     @Transient
-    var mediaImage: NSImage?
+    var mediaImage: NSImage? {
+        get {
+            guard let data = mediaImageData else { return nil }
+            return NSImage(data: data)
+        }
+    }
+    
     @Transient
     var mediaInfoRaw: MediaInfo?
     @Transient
     var processInfoRaw: FocusedWindowInfo?
-
-    // 持久化字段：存储 JSON 字符串
+    
+    // Store integrations as Data for better performance
     @Attribute
-    private var integrationsRaw: String
-
-    // 外部使用的 [String] 接口
+    private var integrationsData: Data?
+    
+    // External interface for integrations
     var integrations: [String] {
         get {
-            (try? JSONDecoder().decode([String].self, from: Data(integrationsRaw.utf8))) ?? []
+            guard let data = integrationsData else { return [] }
+            return (try? JSONDecoder().decode([String].self, from: data)) ?? []
         }
         set {
-            integrationsRaw =
-                (try? JSONEncoder().encode(newValue)).flatMap { String(data: $0, encoding: .utf8) }
-                ?? "[]"
+            integrationsData = try? JSONEncoder().encode(newValue)
         }
     }
-
+    
     func setMediaInfo(_ mediaInfo: MediaInfo) {
         artist = mediaInfo.artist
         mediaName = mediaInfo.name
         mediaProcessName = mediaInfo.processName
         mediaDuration = mediaInfo.duration
         mediaElapsedTime = mediaInfo.elapsedTime
-        if let base64 = mediaInfo.image, let data = Data(base64Encoded: base64) {
-            mediaImage = NSImage(data: data)
+        
+        // Convert base64 to Data
+        if let base64 = mediaInfo.image {
+            mediaImageData = Data(base64Encoded: base64)
         }
+        
         mediaInfoRaw = mediaInfo
     }
-
+    
     func setProcessInfo(_ processInfo: FocusedWindowInfo) {
         processName = processInfo.appName
+        windowTitle = processInfo.title
         processInfoRaw = processInfo
     }
-
+    
     init(
         windowInfo: FocusedWindowInfo?,
         integrations: [String],
@@ -71,14 +84,13 @@ class ReportModel {
     ) {
         id = UUID()
         processName = nil
+        windowTitle = nil
         processInfoRaw = windowInfo
-
+        
         timeStamp = .now
-        integrationsRaw =
-            (try? JSONEncoder().encode(integrations)).flatMap { String(data: $0, encoding: .utf8) }
-            ?? "[]"
+        integrationsData = try? JSONEncoder().encode(integrations)
         mediaInfoRaw = mediaInfo
-
+        
         if let mediaInfo = mediaInfo {
             setMediaInfo(mediaInfo)
         }
@@ -88,25 +100,47 @@ class ReportModel {
     }
 }
 
-#if DEBUG
-    extension ReportModel: CustomDebugStringConvertible {
-        var debugDescription: String {
-            return "Process Name: \(processName)\n"
-                + "Process Title: \(processInfoRaw?.title ?? "N/A")\n"
-                + "Artist: \(artist ?? "N/A")\n" + "Media Name: \(mediaName ?? "N/A")\n"
-                + "Media Process Name: \(mediaProcessName ?? "N/A")\n"
-                + "Media Duration: \(mediaDuration?.description ?? "N/A")\n"
-                + "Media Elapsed Time: \(mediaElapsedTime?.description ?? "N/A")\n"
-                + "Timestamp: \(timeStamp)\n"
-        }
+// Computed properties for frequently accessed data
+extension ReportModel {
+    var hasMediaInfo: Bool {
+        mediaName != nil || artist != nil
     }
-
-#endif
-
-enum ReportModelV1: VersionedSchema {
-    static var versionIdentifier = Schema.Version(1, 0, 0)
-
-    static var models: [any PersistentModel.Type] {
-        [ReportModel.self]
+    
+    var hasProcessInfo: Bool {
+        processName != nil
+    }
+    
+    var displayName: String {
+        if let mediaName = mediaName, !mediaName.isEmpty {
+            return mediaName
+        }
+        return processName ?? "Unknown"
+    }
+    
+    var subtitle: String? {
+        if let artist = artist, !artist.isEmpty {
+            return artist
+        }
+        return windowTitle
     }
 }
+
+#if DEBUG
+extension ReportModel: CustomDebugStringConvertible {
+    var debugDescription: String {
+        return """
+        ReportModel:
+          Process: \(processName ?? "N/A")
+          Window: \(windowTitle ?? "N/A")
+          Media: \(mediaName ?? "N/A") by \(artist ?? "N/A")
+          Media Process: \(mediaProcessName ?? "N/A")
+          Duration: \(mediaDuration?.description ?? "N/A") / \(mediaElapsedTime?.description ?? "N/A")
+          Timestamp: \(timeStamp)
+          Integrations: \(integrations.joined(separator: ", "))
+        """
+    }
+}
+#endif
+
+// Legacy version schemas - kept for reference
+// Note: These are not used in the current migration plan

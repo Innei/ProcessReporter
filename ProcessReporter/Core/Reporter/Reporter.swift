@@ -7,6 +7,7 @@ enum ReporterError: Error {
 	case unknown(message: String, successIntegrations: [String])
 	case ratelimitExceeded(message: String)
 	case ignored
+	case databaseError(String)
 }
 
 enum SendError: Error {
@@ -90,6 +91,10 @@ class Reporter {
 				case .ignored, .ratelimitExceeded:
 					successNames.append(name)
 					return false
+				case .databaseError(let message):
+					failureNames.append(name)
+					NSLog("\(name) database error: \(message)")
+					return true
 				default:
 					failureNames.append(name)
 					NSLog("\(name) failed: \(error)")
@@ -99,10 +104,15 @@ class Reporter {
 			return true
 		}
 
-		if let context = Database.shared.ctx {
-			data.integrations = successNames
-			context.insert(data)
-			try? context.save()
+		// Save to database using background context
+		data.integrations = successNames
+		do {
+			try await Database.shared.performBackgroundTask { context in
+				context.insert(data)
+				try context.save()
+			}
+		} catch {
+			NSLog("Failed to save report to database: \(error)")
 		}
 		let isAllFailed = successNames.isEmpty && !failures.isEmpty
 		if !isAllFailed {

@@ -195,9 +195,10 @@ class ReporterStatusItemManager: NSObject {
 		_ mediaInfo: MediaInfo? = nil
 	) {
 		if let mediaInfo = mediaInfo, let name = mediaInfo.name {
-			currentMediaNameItem.title = formatMediaName(name, mediaInfo.artist)
+			let statusPrefix = mediaInfo.playing ? "" : "⏸ "
+			currentMediaNameItem.title = statusPrefix + formatMediaName(name, mediaInfo.artist)
 			if let base64 = mediaInfo.image, let data = Data(base64Encoded: base64) {
-				let firstLine = name + "\n"
+				let firstLine = statusPrefix + name + "\n"
 				let secondLine = mediaInfo.artist ?? "-"
 				let fullString = firstLine + secondLine
 
@@ -250,9 +251,7 @@ extension ReporterStatusItemManager: NSMenuDelegate {
 		updateCurrentProcessItem(info)
 
 		guard let mediaInfo = MediaInfoManager.getMediaInfo() else { return }
-		if mediaInfo.playing {
-			updateCurrentMediaItem(mediaInfo)
-		}
+		updateCurrentMediaItem(mediaInfo)
 	}
 }
 

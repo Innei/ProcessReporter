@@ -202,12 +202,10 @@ class PreferencesHistoryViewController: NSViewController, SettingWindowProtocol 
 	}
 
 	private func startObservingChanges() {
-		guard let context = Database.shared.ctx else { return }
-
-		// 观察 ModelContext 变化
+		// 观察所有 ModelContext 的变化，不限定特定的 context
 		observer = NotificationCenter.default.addObserver(
 			forName: ModelContext.didSave,
-			object: context,
+			object: nil, // 不指定特定对象，监听所有 ModelContext
 			queue: .main
 		) { [weak self] _ in
 			self?.fetchData()
@@ -221,7 +219,8 @@ class PreferencesHistoryViewController: NSViewController, SettingWindowProtocol 
 	}
 
 	private func fetchData(isLoadingMore: Bool = false) {
-		guard let context = Database.shared.ctx else { return }
+		Task { @MainActor in
+			guard let context = await Database.shared.mainContext else { return }
 
 		if !isLoadingMore {
 			// 重置分页参数
@@ -261,6 +260,7 @@ class PreferencesHistoryViewController: NSViewController, SettingWindowProtocol 
 			print("Failed to fetch data: \(error)")
 			isLoadingData = false
 		}
+		}
 	}
 
 	private func filterResultsWithSearchText(_ searchText: String) {
@@ -272,7 +272,8 @@ class PreferencesHistoryViewController: NSViewController, SettingWindowProtocol 
 			let lowercasedSearchText = searchText.lowercased()
 
 			// 重置分页，获取所有数据进行搜索
-			guard let context = Database.shared.ctx else { return }
+			Task { @MainActor in
+				guard let context = await Database.shared.mainContext else { return }
 			let descriptor = FetchDescriptor<ReportModel>(
 				sortBy: [SortDescriptor(\.timeStamp, order: .reverse)]
 			)
@@ -316,6 +317,7 @@ class PreferencesHistoryViewController: NSViewController, SettingWindowProtocol 
 			} catch {
 				print("Failed to fetch data for search: \(error)")
 			}
+			}
 		}
 	}
 
@@ -335,25 +337,27 @@ class PreferencesHistoryViewController: NSViewController, SettingWindowProtocol 
 	}
 
 	@objc private func clearHistory() {
-		guard let context = Database.shared.ctx else { return }
+		Task { @MainActor in
+			guard let context = await Database.shared.mainContext else { return }
 
-		let alert = NSAlert()
-		alert.messageText = "Clear History"
-		alert.informativeText =
-			"Are you sure you want to clear all history records? This action cannot be undone."
-		alert.alertStyle = .warning
+			let alert = NSAlert()
+			alert.messageText = "Clear History"
+			alert.informativeText =
+				"Are you sure you want to clear all history records? This action cannot be undone."
+			alert.alertStyle = .warning
 
-		alert.addButton(withTitle: "Clear")
-		alert.addButton(withTitle: "Cancel")
+			alert.addButton(withTitle: "Clear")
+			alert.addButton(withTitle: "Cancel")
 
-		if alert.runModal() == .alertFirstButtonReturn {
-			do {
-				// 批量删除
-				try context.delete(model: ReportModel.self)
-				try context.save()
-				fetchData()
-			} catch {
-				print("Failed to clear history: \(error)")
+			if alert.runModal() == .alertFirstButtonReturn {
+				do {
+					// 批量删除
+					try context.delete(model: ReportModel.self)
+					try context.save()
+					fetchData()
+				} catch {
+					print("Failed to clear history: \(error)")
+				}
 			}
 		}
 	}
@@ -498,28 +502,34 @@ extension PreferencesHistoryViewController: NSTableViewDataSource {
 	) {
 		guard let sortDescriptor = tableView.sortDescriptors.first else { return }
 
-		let ascending = sortDescriptor.ascending
+		Task { @MainActor in
+			guard let context = await Database.shared.mainContext else { return }
 
-		guard let context = Database.shared.ctx else { return }
+			let ascending = sortDescriptor.ascending
 
-		// 重置分页并按新的排序条件获取数据
-		currentPage = 0
-		hasMoreData = true
+			// 重置分页并按新的排序条件获取数据
+			currentPage = 0
+			hasMoreData = true
 
-		var descriptor = FetchDescriptor<ReportModel>(
-			sortBy: [SortDescriptor(\.timeStamp, order: ascending ? .forward : .reverse)]
-		)
-		descriptor.fetchLimit = pageSize
-		descriptor.fetchOffset = currentPage * pageSize
+			var descriptor = FetchDescriptor<ReportModel>(
+				sortBy: [SortDescriptor(\.timeStamp, order: ascending ? .forward : .reverse)]
+			)
+			descriptor.fetchLimit = pageSize
+			descriptor.fetchOffset = currentPage * pageSize
 
-		fetchedResults = try! context.fetch(descriptor)
+			do {
+				fetchedResults = try context.fetch(descriptor)
 
-		// 保持搜索过滤
-		if let searchText = searchField?.stringValue, !searchText.isEmpty {
-			filterResultsWithSearchText(searchText)
+				// 保持搜索过滤
+				if let searchText = searchField?.stringValue, !searchText.isEmpty {
+					filterResultsWithSearchText(searchText)
+				}
+
+				tableView.reloadData()
+			} catch {
+				print("Failed to fetch sorted data: \(error)")
+			}
 		}
-
-		tableView.reloadData()
 	}
 }
 

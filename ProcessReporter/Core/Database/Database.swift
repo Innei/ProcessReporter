@@ -7,97 +7,142 @@
 import Foundation
 import SwiftData
 
-@MainActor
-class Database {
+actor Database {
     static let shared = Database()
     private var modelContainer: ModelContainer?
-
-    public var ctx: ModelContext? {
-        modelContainer?.mainContext
+    
+    // Main context for UI operations
+    @MainActor
+    var mainContext: ModelContext? {
+        get async {
+            await modelContainer?.mainContext
+        }
     }
-
-    func initialize() {
+    
+    // Background context for non-UI operations
+    func createBackgroundContext() -> ModelContext? {
+        guard let container = modelContainer else { return nil }
+        return ModelContext(container)
+    }
+    
+    func initialize() async throws {
         // Set up default location in Application Support directory
         let fileManager = FileManager.default
-        let appSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first!
-        let bundleID = Bundle.main.bundleIdentifier!
+        guard let appSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first,
+              let bundleID = Bundle.main.bundleIdentifier else {
+            throw DatabaseError.invalidConfiguration
+        }
+        
         let directoryURL = appSupportURL.appendingPathComponent(bundleID)
-
-        // Set the path to the name of the store you want to set up
         let fileURL = directoryURL.appendingPathComponent("db.store")
-
-        debugPrint(fileURL)
-        // Create a schema for your model (**Item 1**)
+        
+        debugPrint("Database location: \(fileURL)")
+        
+        // Create schema
         let schema = Schema([ReportModel.self, IconModel.self])
-
+        
+        // Create directory if needed
+        try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true, attributes: nil)
+        
+        // Create ModelConfiguration
+        let configuration = ModelConfiguration(bundleID, schema: schema, url: fileURL)
+        
+        // Create ModelContainer with migration plan
         do {
-            // This next line will create a new directory called Example in Application Support if one doesn't already exist, and will do nothing if one already exists, so we have a valid place to put our store
-            try fileManager.createDirectory(
-                at: directoryURL, withIntermediateDirectories: true, attributes: nil)
-
-            // Create our `ModelConfiguration` (**Item 3**)
-            let defaultConfiguration = ModelConfiguration(bundleID, schema: schema, url: fileURL)
-
-            do {
-                // Create our `ModelContainer`
-                modelContainer = try ModelContainer(
-                    for: schema,
-                    migrationPlan: MigrationPlan.self,
-                    configurations: defaultConfiguration
-                )
-            } catch {
-                fatalError("Could not initialise the container…")
-            }
+            modelContainer = try ModelContainer(
+                for: schema,
+                migrationPlan: MigrationPlan.self,
+                configurations: configuration
+            )
         } catch {
-            fatalError("Could not find/create Example folder in Application Support")
+            // If migration fails, remove the old database and create a new one
+            print("Migration failed with error: \(error)")
+            print("Removing old database and creating new one...")
+            
+            try? fileManager.removeItem(at: fileURL)
+            
+            // Try again without migration plan for a fresh start
+            modelContainer = try ModelContainer(
+                for: schema,
+                configurations: configuration
+            )
+        }
+    }
+    
+    // Convenience method for performing background operations
+    func performBackgroundTask<T>(_ operation: @escaping (ModelContext) throws -> T) async throws -> T {
+        guard let context = createBackgroundContext() else {
+            throw DatabaseError.contextUnavailable
+        }
+        
+        return try await Task {
+            try operation(context)
+        }.value
+    }
+    
+    // Batch insert with transaction support
+    func batchInsert<T: PersistentModel>(_ models: [T]) async throws {
+        try await performBackgroundTask { context in
+            for model in models {
+                context.insert(model)
+            }
+            try context.save()
+        }
+    }
+    
+    // Fetch with background context
+    func fetch<T: PersistentModel>(_ descriptor: FetchDescriptor<T>) async throws -> [T] {
+        try await performBackgroundTask { context in
+            try context.fetch(descriptor)
         }
     }
 }
 
+// Database errors
+enum DatabaseError: LocalizedError {
+    case invalidConfiguration
+    case contextUnavailable
+    case migrationFailed(String)
+    
+    var errorDescription: String? {
+        switch self {
+        case .invalidConfiguration:
+            return "Invalid database configuration"
+        case .contextUnavailable:
+            return "Database context is not available"
+        case .migrationFailed(let reason):
+            return "Migration failed: \(reason)"
+        }
+    }
+}
+
+// Simplified migration plan
 enum MigrationPlan: SchemaMigrationPlan {
     static var schemas: [any VersionedSchema.Type] {
-        [ReportModelV1.self, IconModelV1.self, IconModelV2.self]
+        [CurrentSchema.self]
     }
-
+    
     static var stages: [MigrationStage] {
-        [
-            MigrationStage.custom(
-                fromVersion: IconModelV1.self,
-                toVersion: IconModelV2.self,
-                willMigrate: { context in
-                    try migrateIconModelToV2(context: context)
-                },
-                didMigrate: nil
-            )
-        ]
+        // No migration stages for now - start fresh
+        []
     }
+}
 
-    static func migrateIconModelToV2(context: ModelContext) throws {
-        let fetchDescriptor = FetchDescriptor<IconModel>()
-        let allIcons = try context.fetch(fetchDescriptor)
+// Current schema for clean start
+enum CurrentSchema: VersionedSchema {
+    static var versionIdentifier = Schema.Version(1, 0, 0)
+    
+    static var models: [any PersistentModel.Type] {
+        [ReportModel.self, IconModel.self]
+    }
+}
 
-        // Group by applicationIdentifier
-        var iconsByIdentifier: [String: [IconModel]] = [:]
-
-        for icon in allIcons {
-            if iconsByIdentifier[icon.applicationIdentifier] == nil {
-                iconsByIdentifier[icon.applicationIdentifier] = []
-            }
-            iconsByIdentifier[icon.applicationIdentifier]?.append(icon)
-        }
-
-        // Keep first item, delete duplicates
-        for (_, icons) in iconsByIdentifier {
-            if icons.count > 1 {
-                // Keep the first one
-                let firstIcon = icons[0]
-
-                // Delete the rest
-                for i in 1..<icons.count {
-                    context.delete(icons[i])
-                }
-            }
+// Backwards compatibility extension
+extension Database {
+    @MainActor
+    var ctx: ModelContext? {
+        get async {
+            await mainContext
         }
     }
 }

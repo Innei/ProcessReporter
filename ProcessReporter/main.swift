@@ -8,8 +8,20 @@ func main() {
     app.delegate = delegate
 
     Task { @MainActor in
-        Database.shared.initialize()
-        reporter = Reporter()
+        do {
+            try await Database.shared.initialize()
+            reporter = Reporter()
+        } catch {
+            NSLog("Failed to initialize database: \(error)")
+            // Show alert to user
+            let alert = NSAlert()
+            alert.alertStyle = .critical
+            alert.messageText = "Database Initialization Failed"
+            alert.informativeText = error.localizedDescription
+            alert.addButton(withTitle: "Quit")
+            alert.runModal()
+            NSApplication.shared.terminate(nil)
+        }
     }
 
     setupMenu()

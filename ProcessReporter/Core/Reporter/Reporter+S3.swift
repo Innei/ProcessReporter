@@ -41,17 +41,16 @@ class S3ReporterExtension: ReporterExtension {
                     return .failure(.networkError("Upload failed"))
                 }
 
-                let iconModel = IconModel(
-                    name: appName, url: url,
-                    applicationIdentifier: applicationIdentifier
-                )
-                if let context = await Database.shared.ctx {
-                    context.insert(iconModel)
-                    do {
-                        try context.save()
-                    } catch {
-                        print("Failed to save icon model: \(error)")
-                    }
+                // Use the new findOrCreate method
+                do {
+                    _ = try await IconModel.findOrCreate(
+                        name: appName,
+                        url: url,
+                        bundleID: applicationIdentifier
+                    )
+                } catch {
+                    print("Failed to save icon model: \(error)")
+                    return .failure(.databaseError(error.localizedDescription))
                 }
 
                 return .success(())
