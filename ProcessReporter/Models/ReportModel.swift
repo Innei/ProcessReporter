@@ -37,9 +37,9 @@ class ReportModel {
     }
     
     @Transient
-    var mediaInfoRaw: MediaInfo?
+    var mediaInfoRaw: MediaInfo? = nil
     @Transient
-    var processInfoRaw: FocusedWindowInfo?
+    var processInfoRaw: FocusedWindowInfo? = nil
     
     // Store integrations as Data for better performance
     @Attribute

@@ -113,6 +113,11 @@ class Reporter {
 
 		// Save to database using background context
 		data.integrations = successNames
+		
+		// Clear @Transient properties before saving to prevent serialization issues
+		data.mediaInfoRaw = nil
+		data.processInfoRaw = nil
+		
 		do {
 			try await Database.shared.performBackgroundTask { context in
 				context.insert(data)
