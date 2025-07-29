@@ -39,6 +39,22 @@ class Reporter {
 		cachedFilteredMediaAppNames.removeAll()
 		mappingCache.removeAll()
 	}
+	
+	// Handle wake from sleep - reinitialize components if needed
+	public func handleWakeFromSleep() {
+		print("[Reporter] Handling wake from sleep - reinitializing components...")
+		
+		// Clear caches that might be stale after sleep
+		clearCaches()
+		
+		// Restart application monitoring if it was active
+		if PreferencesDataModel.shared.isEnabled.value {
+			ApplicationMonitor.shared.startMouseMonitoring()
+			ApplicationMonitor.shared.startWindowFocusMonitoring()
+		}
+		
+		print("[Reporter] Wake from sleep handling completed")
+	}
 
 	// Register a reporter extension
 	public func registerExtension(_ extension: ReporterExtension) {

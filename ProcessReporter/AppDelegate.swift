@@ -100,14 +100,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func reinitializeAfterWake() {
-        // Restart media monitoring after wake
+        // Reinitialize media monitoring after wake with proper callback restoration
         Task {
             try? await Task.sleep(nanoseconds: 2_000_000_000)  // Wait 2 seconds for system to stabilize
 
-            // We need to provide a callback if restarting media monitoring
-            // Since we're just waking up, we can use an empty callback for now
-            MediaInfoManager.startMonitoringPlaybackChanges { _ in
-                // Media info changed after wake - handled by existing reporters
+            // Instead of overriding the callback, let's restart the media monitoring 
+            // by stopping and restarting if there was an existing callback
+            if MediaInfoManager.hasActiveCallback() {
+                MediaInfoManager.restartMonitoring()
+            }
+            
+            // Notify reporter to reinitialize if needed
+            if let reporter = reporter {
+                await reporter.handleWakeFromSleep()
             }
         }
 

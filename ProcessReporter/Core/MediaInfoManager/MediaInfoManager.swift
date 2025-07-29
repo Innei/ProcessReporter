@@ -36,6 +36,32 @@ public class MediaInfoManager: NSObject {
     playbackStateChangedCallback = nil
   }
 
+  // Check if there's an active callback
+  public static func hasActiveCallback() -> Bool {
+    return playbackStateChangedCallback != nil
+  }
+  
+  // Restart monitoring with the existing callback (useful after system wake)
+  public static func restartMonitoring() {
+    guard let callback = playbackStateChangedCallback else {
+      return
+    }
+    
+    // Stop current monitoring
+    provider.stopMonitoring()
+    
+    // Reset failure counters if provider supports it
+    if let cliProvider = provider as? CLIMediaInfoProvider {
+      cliProvider.resetFailureCounter()
+    }
+    
+    // Small delay to ensure clean restart
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+      // Restart with existing callback
+      provider.startMonitoring(callback: callback)
+    }
+  }
+
   public static func getMediaInfo() -> MediaInfo? {
     return provider.getMediaInfo()
   }
