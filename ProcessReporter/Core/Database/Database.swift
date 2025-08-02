@@ -15,17 +15,23 @@ actor Database {
     @MainActor
     var mainContext: ModelContext? {
         get async {
-            await modelContainer?.mainContext
+            guard let container = await modelContainer else { return nil }
+            return container.mainContext
         }
     }
     
     // Background context for non-UI operations
-    func createBackgroundContext() -> ModelContext? {
-        guard let container = modelContainer else { return nil }
+    func createBackgroundContext() throws -> ModelContext {
+        guard let container = modelContainer else {
+            throw DatabaseError.contextUnavailable
+        }
         return ModelContext(container)
     }
     
     func initialize() async throws {
+        // Ensure we don't initialize multiple times
+        guard modelContainer == nil else { return }
+        
         // Set up default location in Application Support directory
         let fileManager = FileManager.default
         guard let appSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first,
@@ -54,29 +60,38 @@ actor Database {
                 migrationPlan: MigrationPlan.self,
                 configurations: configuration
             )
+            print("Database initialized successfully with migration plan")
         } catch {
             // If migration fails, remove the old database and create a new one
             print("Migration failed with error: \(error)")
             print("Removing old database and creating new one...")
             
-            try? fileManager.removeItem(at: fileURL)
-            
-            // Try again without migration plan for a fresh start
-            modelContainer = try ModelContainer(
-                for: schema,
-                configurations: configuration
-            )
+            do {
+                try? fileManager.removeItem(at: fileURL)
+                
+                // Try again without migration plan for a fresh start
+                modelContainer = try ModelContainer(
+                    for: schema,
+                    configurations: configuration
+                )
+                print("Database initialized successfully with fresh start")
+            } catch {
+                print("Failed to create fresh database: \(error)")
+                throw DatabaseError.migrationFailed("Failed to create database: \(error.localizedDescription)")
+            }
         }
     }
     
     // Convenience method for performing background operations
     func performBackgroundTask<T>(_ operation: @escaping (ModelContext) throws -> T) async throws -> T {
-        guard let context = createBackgroundContext() else {
+        guard let container = modelContainer else {
             throw DatabaseError.contextUnavailable
         }
         
-        return try await Task {
-            try operation(context)
+        // Create context within the task to ensure proper lifecycle
+        return try await Task.detached {
+            let context = ModelContext(container)
+            return try operation(context)
         }.value
     }
     
@@ -95,6 +110,11 @@ actor Database {
         try await performBackgroundTask { context in
             try context.fetch(descriptor)
         }
+    }
+    
+    // Cleanup resources
+    func cleanup() async {
+        modelContainer = nil
     }
 }
 

@@ -37,7 +37,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func applicationWillTerminate(_ aNotification: Notification) {}
+    func applicationWillTerminate(_ aNotification: Notification) {
+        // Cleanup database resources
+        Task {
+            await Database.shared.cleanup()
+        }
+    }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
         return true
