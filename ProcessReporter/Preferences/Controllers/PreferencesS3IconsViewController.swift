@@ -8,15 +8,14 @@
 import AppKit
 import Foundation
 import SnapKit
-import SwiftData
 
 class PreferencesS3IconsViewController: NSViewController, SettingWindowProtocol {
     final let frameSize: NSSize = .init(width: 1000, height: 500)
 
     private var tableView: NSTableView!
     private var scrollView: NSScrollView!
-    private var fetchedResults: [IconModel] = []
-    private var allResults: [IconModel] = []
+    private var fetchedResults: [IconValue] = []
+    private var allResults: [IconValue] = []
     private var searchField: NSSearchField!
     private var observer: Any?
 
@@ -164,18 +163,22 @@ class PreferencesS3IconsViewController: NSViewController, SettingWindowProtocol 
         let menu = NSMenu()
         menu.addItem(
             NSMenuItem(
-                title: "Copy Cell Value", action: #selector(copyCellValue), keyEquivalent: "c", target: self))
+                title: "Copy Cell Value", action: #selector(copyCellValue), keyEquivalent: "c",
+                target: self))
         menu.addItem(
             NSMenuItem(
-                title: "Copy Row as JSON", action: #selector(copyRowAsJSON), keyEquivalent: "j", target: self))
+                title: "Copy Row as JSON", action: #selector(copyRowAsJSON), keyEquivalent: "j",
+                target: self))
         menu.addItem(
             NSMenuItem(
-                title: "Open URL in Browser", action: #selector(openURLInBrowser), keyEquivalent: "o", target: self))
+                title: "Open URL in Browser", action: #selector(openURLInBrowser),
+                keyEquivalent: "o", target: self))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(
             {
                 let item = NSMenuItem(
-                    title: "Delete Icon", action: #selector(deleteIcon), keyEquivalent: "\u{08}", target: self)
+                    title: "Delete Icon", action: #selector(deleteIcon), keyEquivalent: "\u{08}",
+                    target: self)
                 item.attributedTitle = NSAttributedString(
                     string: "Delete Icon",
                     attributes: [.foregroundColor: NSColor.red])
@@ -187,17 +190,12 @@ class PreferencesS3IconsViewController: NSViewController, SettingWindowProtocol 
     }
 
     private func startObservingChanges() {
-        Task { @MainActor in
-            guard let context = await Database.shared.mainContext else { return }
-            
-            // Observe ModelContext changes
-            observer = NotificationCenter.default.addObserver(
-                forName: ModelContext.didSave,
-                object: context,
-                queue: .main)
-            { [weak self] _ in
-                self?.fetchData()
-            }
+        observer = NotificationCenter.default.addObserver(
+            forName: DataStore.changedNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.fetchData()
         }
     }
 
@@ -209,26 +207,14 @@ class PreferencesS3IconsViewController: NSViewController, SettingWindowProtocol 
 
     private func fetchData() {
         Task { @MainActor in
-            guard let context = await Database.shared.mainContext else { return }
-            
-            let descriptor = FetchDescriptor<IconModel>(
-                sortBy: [SortDescriptor(\.name, order: .forward)]
-            )
-            
-            do {
-                allResults = try context.fetch(descriptor)
-                
-                // Filter results by search text
-                if let searchText = searchField?.stringValue, !searchText.isEmpty {
-                    filterResultsWithSearchText(searchText)
-                } else {
-                    fetchedResults = allResults
-                }
-                
-                tableView.reloadData()
-            } catch {
-                print("Failed to fetch icons: \(error)")
+            let results = await DataStore.shared.fetchIconsSorted(by: .name, ascending: true)
+            allResults = results
+            if let searchText = searchField?.stringValue, !searchText.isEmpty {
+                filterResultsWithSearchText(searchText)
+            } else {
+                fetchedResults = allResults
             }
+            tableView.reloadData()
         }
     }
 
@@ -271,7 +257,7 @@ class PreferencesS3IconsViewController: NSViewController, SettingWindowProtocol 
 
     @objc private func copyCellValue() {
         guard tableView.clickedRow >= 0 && tableView.clickedColumn >= 0,
-              tableView.clickedRow < fetchedResults.count
+            tableView.clickedRow < fetchedResults.count
         else {
             return
         }
@@ -348,7 +334,8 @@ class PreferencesS3IconsViewController: NSViewController, SettingWindowProtocol 
 
         let alert = NSAlert()
         alert.messageText = "Delete Icon"
-        alert.informativeText = "Are you sure you want to delete this icon record for '\(model.name)'?"
+        alert.informativeText =
+            "Are you sure you want to delete this icon record for '\(model.name)'?"
         alert.alertStyle = .warning
 
         alert.addButton(withTitle: "Delete")
@@ -356,12 +343,9 @@ class PreferencesS3IconsViewController: NSViewController, SettingWindowProtocol 
 
         if alert.runModal() == .alertFirstButtonReturn {
             Task { @MainActor in
-                guard let context = await Database.shared.mainContext else { return }
-                
-                context.delete(model)
-                
                 do {
-                    try context.save()
+                    try await DataStore.shared.deleteIcon(
+                        applicationIdentifier: model.applicationIdentifier)
                     fetchData()
                 } catch {
                     print("Failed to delete icon: \(error)")
@@ -375,7 +359,7 @@ class PreferencesS3IconsViewController: NSViewController, SettingWindowProtocol 
         let closeButton = NSButton(title: "Close", target: self, action: #selector(closeModal))
         closeButton.bezelStyle = .rounded
         closeButton.bezelColor = .systemBlue
-        closeButton.keyEquivalent = "\u{1B}" // Escape key
+        closeButton.keyEquivalent = "\u{1B}"  // Escape key
 
         view.addSubview(closeButton)
 
@@ -415,48 +399,25 @@ extension PreferencesS3IconsViewController: NSTableViewDataSource {
         _ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]
     ) {
         guard let sortDescriptor = tableView.sortDescriptors.first else { return }
-        
+
         Task { @MainActor in
-            guard let context = await Database.shared.mainContext else { return }
-            
-            let keyPath = sortDescriptor.key!
+            let keyPath = sortDescriptor.key ?? "name"
             let ascending = sortDescriptor.ascending
-            
-            var fetchDescriptor: FetchDescriptor<IconModel>
-            
+            let sortKey: DataStore.IconSortKey
             switch keyPath {
-            case "name":
-                fetchDescriptor = FetchDescriptor<IconModel>(
-                    sortBy: [SortDescriptor(\.name, order: ascending ? .forward : .reverse)]
-                )
-            case "applicationIdentifier":
-                fetchDescriptor = FetchDescriptor<IconModel>(
-                    sortBy: [SortDescriptor(\.applicationIdentifier, order: ascending ? .forward : .reverse)]
-                )
-            case "url":
-                fetchDescriptor = FetchDescriptor<IconModel>(
-                    sortBy: [SortDescriptor(\.url, order: ascending ? .forward : .reverse)]
-                )
-            default:
-                fetchDescriptor = FetchDescriptor<IconModel>(
-                    sortBy: [SortDescriptor(\.name, order: .forward)]
-                )
+            case "name": sortKey = .name
+            case "applicationIdentifier": sortKey = .applicationIdentifier
+            case "url": sortKey = .url
+            default: sortKey = .name
             }
-            
-            do {
-                allResults = try context.fetch(fetchDescriptor)
-                
-                // Maintain search filter
-                if let searchText = searchField?.stringValue, !searchText.isEmpty {
-                    filterResultsWithSearchText(searchText)
-                } else {
-                    fetchedResults = allResults
-                }
-                
-                tableView.reloadData()
-            } catch {
-                print("Failed to fetch icons: \(error)")
+
+            allResults = await DataStore.shared.fetchIconsSorted(by: sortKey, ascending: ascending)
+            if let searchText = searchField?.stringValue, !searchText.isEmpty {
+                filterResultsWithSearchText(searchText)
+            } else {
+                fetchedResults = allResults
             }
+            tableView.reloadData()
         }
     }
 }
@@ -489,7 +450,7 @@ extension PreferencesS3IconsViewController: NSTableViewDelegate {
         }
 
         switch tableColumn.identifier.rawValue {
-      
+
         case "name":
             textField.stringValue = model.name
 

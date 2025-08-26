@@ -51,8 +51,7 @@ private func sendMixSpaceRequest(data: ReportModel) async -> Result<Void, Report
     let method = config.requestMethod
     let token = config.apiToken
 
-    let iconUrl = await IconModel.findIcon(for: data.processInfoRaw?.applicationIdentifier ?? "")?
-        .url
+    let iconUrl = await DataStore.shared.iconURL(for: data.processInfoRaw?.applicationIdentifier ?? "")
 
     var description: String?
 

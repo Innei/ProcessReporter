@@ -94,11 +94,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Stop media monitoring to free resources
         MediaInfoManager.stopMonitoringPlaybackChanges()
 
-        // Save any pending database changes
-        Task { @MainActor in
-            if let context = await Database.shared.mainContext {
-                try? context.save()
-            }
+        // Save any pending database changes via DataStore
+        Task {
+            await DataStore.shared.flush()
         }
 
         print("Cache cleanup completed before sleep")

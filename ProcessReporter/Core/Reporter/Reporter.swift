@@ -85,7 +85,7 @@ class Reporter {
 		mapping.removeValue(forKey: name)
 	}
 
-	public func send(data: ReportModel) async -> Result<[String], SendError> {
+    public func send(data: ReportModel) async -> Result<[String], SendError> {
 		let results = await withTaskGroup(of: (String, Result<Void, ReporterError>).self) { group in
 			for (name, options) in mapping {
 				group.addTask {
@@ -127,25 +127,26 @@ class Reporter {
 			return true
 		}
 
-		// Save to database using background context
-		data.integrations = successNames
-		
-		// Clear @Transient properties before saving to prevent serialization issues
-		data.mediaInfoRaw = nil
-		data.processInfoRaw = nil
-		
-		do {
-			try await Database.shared.performBackgroundTask { context in
-				context.insert(data)
-				try context.save()
-			}
-		} catch {
-			NSLog("Failed to save report to database: \(error)")
-		}
+        // Persist via DataStore (value-only, no SwiftData leakage)
+        data.integrations = successNames
+        let reportValue = ReportValue(
+            id: data.id,
+            processName: data.processName,
+            windowTitle: data.windowTitle,
+            timeStamp: data.timeStamp,
+            artist: data.artist,
+            mediaName: data.mediaName,
+            mediaProcessName: data.mediaProcessName,
+            mediaDuration: data.mediaDuration,
+            mediaElapsedTime: data.mediaElapsedTime,
+            mediaImageData: data.mediaImageData,
+            integrations: data.integrations
+        )
+        await DataStore.shared.saveReport(reportValue)
 		let isAllFailed = successNames.isEmpty && !failures.isEmpty
 		if !isAllFailed {
 			statusItemManager.updateLastSendProcessNameItem(data)
-		}
+    }
 
 		if failures.isEmpty {
 			statusItemManager.toggleStatusItemIcon(.syncing)

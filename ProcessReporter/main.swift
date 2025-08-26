@@ -9,7 +9,7 @@ func main() {
 
     Task { @MainActor in
         do {
-            try await Database.shared.initialize()
+            try await DataStore.shared.initialize()
             reporter = Reporter()
         } catch {
             NSLog("Failed to initialize database: \(error)")

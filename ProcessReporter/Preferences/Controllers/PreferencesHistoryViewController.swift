@@ -8,7 +8,6 @@
 import AppKit
 import Foundation
 import SnapKit
-import SwiftData
 
 class PreferencesHistoryViewController: NSViewController, SettingWindowProtocol {
 	final let frameSize: NSSize = .init(width: 1200, height: 600)
@@ -16,8 +15,8 @@ class PreferencesHistoryViewController: NSViewController, SettingWindowProtocol 
 	private var tableView: NSTableView!
 	private var scrollView: NSScrollView!
 	private var sortDescriptor: NSSortDescriptor?
-	private var fetchedResults: [ReportModel] = []
-	private var allResults: [ReportModel] = []
+	private var fetchedResults: [ReportValue] = []
+	private var allResults: [ReportValue] = []
 	private var searchField: NSSearchField!
 	private var observer: Any?
 
@@ -202,10 +201,10 @@ class PreferencesHistoryViewController: NSViewController, SettingWindowProtocol 
 	}
 
 	private func startObservingChanges() {
-		// 观察所有 ModelContext 的变化，不限定特定的 context
+		// 监听 DataStore 更改
 		observer = NotificationCenter.default.addObserver(
-			forName: ModelContext.didSave,
-			object: nil, // 不指定特定对象，监听所有 ModelContext
+			forName: DataStore.changedNotification,
+			object: nil,
 			queue: .main
 		) { [weak self] _ in
 			self?.fetchData()
@@ -220,24 +219,22 @@ class PreferencesHistoryViewController: NSViewController, SettingWindowProtocol 
 
 	private func fetchData(isLoadingMore: Bool = false) {
 		Task { @MainActor in
-			guard let context = await Database.shared.mainContext else { return }
+			if !isLoadingMore {
+				// 重置分页参数
+				currentPage = 0
+				hasMoreData = true
+				fetchedResults = []
+			}
 
-		if !isLoadingMore {
-			// 重置分页参数
-			currentPage = 0
-			hasMoreData = true
-			fetchedResults = []
-		}
-
-		var descriptor = FetchDescriptor<ReportModel>(
-			sortBy: [SortDescriptor(\.timeStamp, order: .reverse)]
-		)
-
-		descriptor.fetchLimit = pageSize
-		descriptor.fetchOffset = currentPage * pageSize
-
-		do {
-			let newResults: [ReportModel] = try context.fetch(descriptor)
+			let ascending = sortDescriptor?.ascending ?? false
+			let offset = currentPage * pageSize
+			let search = (searchField?.stringValue).flatMap { $0.isEmpty ? nil : $0 }
+			let newResults = await DataStore.shared.fetchReports(
+				searchText: search,
+				offset: offset,
+				limit: pageSize,
+				ascending: ascending
+			)
 
 			// 检查是否还有更多数据
 			hasMoreData = newResults.count == pageSize
@@ -249,17 +246,8 @@ class PreferencesHistoryViewController: NSViewController, SettingWindowProtocol 
 				fetchedResults = newResults
 			}
 
-			// 如果有搜索条件，则过滤结果
-			if let searchText = searchField?.stringValue, !searchText.isEmpty {
-				filterResultsWithSearchText(searchText)
-			}
-
 			tableView.reloadData()
 			isLoadingData = false
-		} catch {
-			print("Failed to fetch data: \(error)")
-			isLoadingData = false
-		}
 		}
 	}
 
@@ -268,55 +256,17 @@ class PreferencesHistoryViewController: NSViewController, SettingWindowProtocol 
 			// 清空搜索时，重新从数据库获取数据（带分页）
 			fetchData()
 		} else {
-			// 搜索时需要获取所有数据进行过滤
-			let lowercasedSearchText = searchText.lowercased()
-
-			// 重置分页，获取所有数据进行搜索
+			// 搜索模式下直接让 DataStore 过滤并返回结果（不分页）
 			Task { @MainActor in
-				guard let context = await Database.shared.mainContext else { return }
-			let descriptor = FetchDescriptor<ReportModel>(
-				sortBy: [SortDescriptor(\.timeStamp, order: .reverse)]
-			)
-
-			do {
-				allResults = try context.fetch(descriptor)
-
-				fetchedResults = allResults.filter { model in
-					let processName = model.processName?.lowercased() ?? "N/A"
-					// 搜索进程名
-					if processName.contains(lowercasedSearchText) {
-						return true
-					}
-
-					// 搜索媒体名
-					if let mediaName = model.mediaName?.lowercased(),
-						mediaName.contains(lowercasedSearchText)
-					{
-						return true
-					}
-
-					// 搜索艺术家
-					if let artist = model.artist?.lowercased(),
-						artist.contains(lowercasedSearchText)
-					{
-						return true
-					}
-
-					// 搜索集成
-					if model.integrations.joined(separator: " ").lowercased().contains(
-						lowercasedSearchText)
-					{
-						return true
-					}
-
-					return false
-				}
-
-				hasMoreData = false  // 搜索模式下不需要分页
+				let results = await DataStore.shared.fetchReports(
+					searchText: searchText,
+					offset: 0,
+					limit: Int.max / 4,
+					ascending: sortDescriptor?.ascending ?? false
+				)
+				fetchedResults = results
+				hasMoreData = false
 				tableView.reloadData()
-			} catch {
-				print("Failed to fetch data for search: \(error)")
-			}
 			}
 		}
 	}
@@ -338,8 +288,6 @@ class PreferencesHistoryViewController: NSViewController, SettingWindowProtocol 
 
 	@objc private func clearHistory() {
 		Task { @MainActor in
-			guard let context = await Database.shared.mainContext else { return }
-
 			let alert = NSAlert()
 			alert.messageText = "Clear History"
 			alert.informativeText =
@@ -351,9 +299,7 @@ class PreferencesHistoryViewController: NSViewController, SettingWindowProtocol 
 
 			if alert.runModal() == .alertFirstButtonReturn {
 				do {
-					// 批量删除
-					try context.delete(model: ReportModel.self)
-					try context.save()
+					try await DataStore.shared.deleteAllReports()
 					fetchData()
 				} catch {
 					print("Failed to clear history: \(error)")
@@ -503,32 +449,21 @@ extension PreferencesHistoryViewController: NSTableViewDataSource {
 		guard let sortDescriptor = tableView.sortDescriptors.first else { return }
 
 		Task { @MainActor in
-			guard let context = await Database.shared.mainContext else { return }
-
 			let ascending = sortDescriptor.ascending
 
 			// 重置分页并按新的排序条件获取数据
 			currentPage = 0
 			hasMoreData = true
 
-			var descriptor = FetchDescriptor<ReportModel>(
-				sortBy: [SortDescriptor(\.timeStamp, order: ascending ? .forward : .reverse)]
+			let offset = currentPage * pageSize
+			let search = (searchField?.stringValue).flatMap { $0.isEmpty ? nil : $0 }
+			fetchedResults = await DataStore.shared.fetchReports(
+				searchText: search,
+				offset: offset,
+				limit: pageSize,
+				ascending: ascending
 			)
-			descriptor.fetchLimit = pageSize
-			descriptor.fetchOffset = currentPage * pageSize
-
-			do {
-				fetchedResults = try context.fetch(descriptor)
-
-				// 保持搜索过滤
-				if let searchText = searchField?.stringValue, !searchText.isEmpty {
-					filterResultsWithSearchText(searchText)
-				}
-
-				tableView.reloadData()
-			} catch {
-				print("Failed to fetch sorted data: \(error)")
-			}
+			tableView.reloadData()
 		}
 	}
 }
@@ -540,6 +475,7 @@ extension PreferencesHistoryViewController: NSTableViewDelegate {
 		-> NSView?
 	{
 		guard let tableColumn = tableColumn else { return nil }
+		guard row >= 0 && row < fetchedResults.count else { return nil }
 		let model = fetchedResults[row]
 
 		let identifier = tableColumn.identifier

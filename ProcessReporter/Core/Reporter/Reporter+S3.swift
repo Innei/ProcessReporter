@@ -6,7 +6,6 @@
 //
 
 import Foundation
-import SwiftData
 
 class S3ReporterExtension: ReporterExtension {
     var name: String = "S3"
@@ -28,8 +27,7 @@ class S3ReporterExtension: ReporterExtension {
                     return .failure(.cancelled(message: "S3: No icon data"))
                 }
 
-                let icon = await IconModel.findIcon(for: applicationIdentifier)
-                if icon != nil {
+                if await DataStore.shared.iconExists(for: applicationIdentifier) {
                     return .success(())
                 }
 
@@ -41,9 +39,8 @@ class S3ReporterExtension: ReporterExtension {
                     return .failure(.networkError("Upload failed"))
                 }
 
-                // Use the new findOrCreate method
                 do {
-                    _ = try await IconModel.findOrCreate(
+                    try await DataStore.shared.upsertIcon(
                         name: appName,
                         url: url,
                         bundleID: applicationIdentifier
