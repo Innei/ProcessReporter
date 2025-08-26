@@ -349,18 +349,19 @@ class Reporter {
 		subscribeSettingsChanged()
 	}
 
-	private func initializeExtensions() {
-		// Register all reporter extensions
-		let extensions: [ReporterExtension] = [
-			MixSpaceReporterExtension(),
-			S3ReporterExtension(),
-			SlackReporterExtension(),
-		]
+    private func initializeExtensions() {
+        // Register all reporter extensions
+        let extensions: [ReporterExtension] = [
+            MixSpaceReporterExtension(),
+            S3ReporterExtension(),
+            SlackReporterExtension(),
+            DiscordReporterExtension(),
+        ]
 
-		for ext in extensions {
-			registerExtension(ext)
-		}
-	}
+        for ext in extensions {
+            registerExtension(ext)
+        }
+    }
 
 	deinit {
 		for disposer in disposers {
@@ -429,17 +430,18 @@ extension Reporter {
 			}
 		}
 
-		// Subscribe to extension configuration changes
-		let d3 = Observable.combineLatest(
-			preferences.mixSpaceIntegration,
-			preferences.s3Integration,
-			preferences.slackIntegration
-		).subscribe { [weak self] _ in
-			guard let self = self else { return }
-			Task {
-				await self.updateExtensions()
-			}
-		}
+        // Subscribe to extension configuration changes
+        let d3 = Observable.combineLatest(
+            preferences.mixSpaceIntegration,
+            preferences.s3Integration,
+            preferences.slackIntegration,
+            preferences.discordIntegration
+        ).subscribe { [weak self] _ in
+            guard let self = self else { return }
+            Task {
+                await self.updateExtensions()
+            }
+        }
 
 		disposers.append(contentsOf: [d1, d2, d3])
 	}

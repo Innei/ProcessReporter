@@ -12,25 +12,26 @@ import RxSwift
 class PreferencesDataModel {
 	public static let shared = PreferencesDataModel.self
 
-	static func collectPreferences() -> [String: Any] {
-		[
-			"isEnabled": PreferencesDataModel.isEnabled.value,
-			"focusReport": PreferencesDataModel.focusReport.value,
-			"sendInterval": PreferencesDataModel.sendInterval.value.rawValue,
-			"enabledTypes": PreferencesDataModel.enabledTypes.value.toStorable() ?? [
-				Reporter.Types.media.rawValue, Reporter.Types.process.rawValue,
-			],
-			"mixSpaceIntegration": PreferencesDataModel.mixSpaceIntegration.value.toDictionary(),
-			"slackIntegration": PreferencesDataModel.slackIntegration.value.toDictionary(),
-			"s3Integration": PreferencesDataModel.s3Integration.value.toDictionary(),
-			"ignoreNullArtist": PreferencesDataModel.ignoreNullArtist.value,
-			"filteredProcesses": PreferencesDataModel.filteredProcesses.value,
-			"filteredMediaProcesses": PreferencesDataModel.filteredMediaProcesses.value,
-			"hasShownMediaControlInstallPrompt": PreferencesDataModel.hasShownMediaControlInstallPrompt.value,
+    static func collectPreferences() -> [String: Any] {
+        [
+            "isEnabled": PreferencesDataModel.isEnabled.value,
+            "focusReport": PreferencesDataModel.focusReport.value,
+            "sendInterval": PreferencesDataModel.sendInterval.value.rawValue,
+            "enabledTypes": PreferencesDataModel.enabledTypes.value.toStorable() ?? [
+                Reporter.Types.media.rawValue, Reporter.Types.process.rawValue,
+            ],
+            "mixSpaceIntegration": PreferencesDataModel.mixSpaceIntegration.value.toDictionary(),
+            "slackIntegration": PreferencesDataModel.slackIntegration.value.toDictionary(),
+            "s3Integration": PreferencesDataModel.s3Integration.value.toDictionary(),
+            "discordIntegration": PreferencesDataModel.discordIntegration.value.toDictionary(),
+            "ignoreNullArtist": PreferencesDataModel.ignoreNullArtist.value,
+            "filteredProcesses": PreferencesDataModel.filteredProcesses.value,
+            "filteredMediaProcesses": PreferencesDataModel.filteredMediaProcesses.value,
+            "hasShownMediaControlInstallPrompt": PreferencesDataModel.hasShownMediaControlInstallPrompt.value,
 
-			"mappingList": PreferencesDataModel.mappingList.value.toDictionary(),
-		]
-	}
+            "mappingList": PreferencesDataModel.mappingList.value.toDictionary(),
+        ]
+    }
 
 	public static func exportToPlist() -> Data? {
 		let dictionary = collectPreferences()
@@ -69,15 +70,19 @@ class PreferencesDataModel {
 				PreferencesDataModel.slackIntegration.accept(
 					SlackIntegration.fromDictionary(slackDict))
 			}
-			if let s3Dict = dictionary["s3Integration"] as? [String: Any] {
-				PreferencesDataModel.s3Integration.accept(
-					S3Integration.fromDictionary(s3Dict))
-			}
-			if let enabledTypesArray = dictionary["enabledTypes"] as? [String] {
-				let enabledTypesSet = ReporterTypesSet(
-					types: Set(enabledTypesArray.compactMap(Reporter.Types.fromStorable))
-				)
-				PreferencesDataModel.enabledTypes.accept(enabledTypesSet)
+            if let s3Dict = dictionary["s3Integration"] as? [String: Any] {
+                PreferencesDataModel.s3Integration.accept(
+                    S3Integration.fromDictionary(s3Dict))
+            }
+            if let discordDict = dictionary["discordIntegration"] as? [String: Any] {
+                PreferencesDataModel.discordIntegration.accept(
+                    DiscordIntegration.fromDictionary(discordDict))
+            }
+            if let enabledTypesArray = dictionary["enabledTypes"] as? [String] {
+                let enabledTypesSet = ReporterTypesSet(
+                    types: Set(enabledTypesArray.compactMap(Reporter.Types.fromStorable))
+                )
+                PreferencesDataModel.enabledTypes.accept(enabledTypesSet)
 			}
 			if let ignoreNullArtist = dictionary["ignoreNullArtist"] as? Bool {
 				PreferencesDataModel.ignoreNullArtist.accept(ignoreNullArtist)

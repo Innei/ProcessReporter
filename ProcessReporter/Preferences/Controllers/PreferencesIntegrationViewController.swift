@@ -12,6 +12,7 @@ enum IntegrationType: String, CaseIterable {
     case mxSpace = "Mix Space"
     case slack = "Slack"
     case s3 = "S3"
+    case discord = "Discord"
 
     func nsImage() -> NSImage {
         switch self {
@@ -21,6 +22,9 @@ enum IntegrationType: String, CaseIterable {
             return NSImage(named: "slack")!
         case .s3:
             return NSImage(named: "s3")!
+        case .discord:
+            // Fallback to a system symbol if asset missing to avoid crash
+            return NSImage(named: "discord") ?? NSImage(systemSymbolName: "bubble.left.and.bubble.right.fill", accessibilityDescription: "Discord")!
         }
     }
 
@@ -32,6 +36,8 @@ enum IntegrationType: String, CaseIterable {
             return PreferencesIntegrationSlackView()
         case .s3:
             return PreferencesIntegrationS3View()
+        case .discord:
+            return PreferencesIntegrationDiscordView()
         }
     }
 }

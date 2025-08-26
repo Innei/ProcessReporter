@@ -89,11 +89,11 @@ struct S3Integration: UserDefaultsJSONStorable, DictionaryConvertible {
 }
 
 extension PreferencesDataModel {
-	@UserDefaultsRelay("mixSpaceIntegration", defaultValue: MixSpaceIntegration())
-	static var mixSpaceIntegration: BehaviorRelay<MixSpaceIntegration>
+    @UserDefaultsRelay("mixSpaceIntegration", defaultValue: MixSpaceIntegration())
+    static var mixSpaceIntegration: BehaviorRelay<MixSpaceIntegration>
 
-	@UserDefaultsRelay("slackIntegration", defaultValue: SlackIntegration())
-	static var slackIntegration: BehaviorRelay<SlackIntegration>
+    @UserDefaultsRelay("slackIntegration", defaultValue: SlackIntegration())
+    static var slackIntegration: BehaviorRelay<SlackIntegration>
 }
 
 extension MixSpaceIntegration {
@@ -144,8 +144,46 @@ extension S3Integration {
 }
 
 extension PreferencesDataModel {
-	@UserDefaultsRelay("s3Integration", defaultValue: S3Integration())
-	static var s3Integration: BehaviorRelay<S3Integration>
+    @UserDefaultsRelay("s3Integration", defaultValue: S3Integration())
+    static var s3Integration: BehaviorRelay<S3Integration>
+}
+
+// MARK: - Discord Integration Model
+
+struct DiscordIntegration: UserDefaultsJSONStorable, DictionaryConvertible {
+    var isEnabled: Bool = false
+    var applicationId: String = ""
+    var showProcessInfo: Bool = true
+    var showMediaInfo: Bool = true
+    var prioritizeMedia: Bool = true
+    var showTimestamps: Bool = true
+
+    // Asset keys (must be pre-uploaded in Discord Dev Portal)
+    var customLargeImageKey: String = ""
+    var customLargeImageText: String = ""
+    var brandSmallImageKey: String = "processreporter"
+}
+
+extension DiscordIntegration {
+    static func fromDictionary(_ dict: Any) -> DiscordIntegration {
+        guard let dict = dict as? [String: Any] else { return DiscordIntegration() }
+        var integration = DiscordIntegration()
+        integration.isEnabled = dict["isEnabled"] as? Bool ?? false
+        integration.applicationId = dict["applicationId"] as? String ?? ""
+        integration.showProcessInfo = dict["showProcessInfo"] as? Bool ?? true
+        integration.showMediaInfo = dict["showMediaInfo"] as? Bool ?? true
+        integration.prioritizeMedia = dict["prioritizeMedia"] as? Bool ?? true
+        integration.showTimestamps = dict["showTimestamps"] as? Bool ?? true
+        integration.customLargeImageKey = dict["customLargeImageKey"] as? String ?? ""
+        integration.customLargeImageText = dict["customLargeImageText"] as? String ?? ""
+        integration.brandSmallImageKey = dict["brandSmallImageKey"] as? String ?? "processreporter"
+        return integration
+    }
+}
+
+extension PreferencesDataModel {
+    @UserDefaultsRelay("discordIntegration", defaultValue: DiscordIntegration())
+    static var discordIntegration: BehaviorRelay<DiscordIntegration>
 }
 
 extension EmojiConditionList.EmojiCondition {
