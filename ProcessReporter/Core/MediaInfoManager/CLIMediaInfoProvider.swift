@@ -10,570 +10,423 @@ import Foundation
 /// Compatible with macOS 15.4 and later
 class CLIMediaInfoProvider: MediaInfoProvider {
 
-  // MARK: - Properties
+  // MARK: - Public Helpers
+
+  /// Quick check for whether media-control is available on this system
+  static func isMediaControlInstalled() -> Bool {
+    return CLIMediaInfoProvider().findMediaControlExecutable() != nil
+  }
+
+  // MARK: - Monitoring
 
   private var timer: Timer?
   private var callback: MediaInfoManager.PlaybackStateChangedCallback?
-  private var lastMediaInfo: MediaInfo?
-  private var isMonitoring = false
-  private let pollingInterval: TimeInterval = {
-    #if DEBUG
-      return 1.0
-    #else
-      return 5.0
-    #endif
-  }()
-  private var currentProcess: Process?
-  private let processQueue = DispatchQueue(
-    label: "com.processreporter.cli.queue", attributes: .concurrent)
-  private let processLock = NSLock()
+  private var lastSnapshotKey: String?
+  private var lastInfo: MediaInfo?
   private var consecutiveFailures = 0
-  private let maxConsecutiveFailures = 5
-  private let cliTimeout: TimeInterval = 5.0
-  private let failureResetDelay: TimeInterval = 30.0
-  private let processTerminationDelay: TimeInterval = 1.0
-  private let forceKillDelay: TimeInterval = 0.5
+  private var streamProcess: Process?
+  private var streamStdout: FileHandle?
+  private var streamBuffer = Data()
+  private let streamQueue = DispatchQueue(label: "media-control.stream.queue")
+  private var isStreaming = false
 
-  // MARK: - Constants
-
-  private enum Constants {
-    static let elapsedTimeThreshold: TimeInterval = 2.0
-    static let jsonPreviewLength = 200
-    static let mediaControlCommand = "get"
+  func resetFailureCounter() {
+    consecutiveFailures = 0
   }
 
-  // MARK: - MediaInfoProvider Implementation
-
   func startMonitoring(callback: @escaping MediaInfoManager.PlaybackStateChangedCallback) {
+    // Stop existing monitoring first to avoid clearing the new callback
+    stopMonitoring()
+    self.callback = callback
 
-    debugPrint("[CLIMediaInfoProvider] 🚀 Starting monitoring...")
-
-    guard !isMonitoring else {
-
-      debugPrint("[CLIMediaInfoProvider] ⚠️ Already monitoring, ignoring start request")
-
+    // Prefer streaming if available
+    if startStream() {
       return
     }
 
-    self.callback = callback
-    self.isMonitoring = true
-
-    debugPrint("[CLIMediaInfoProvider] Callback set, getting initial state...")
-
-    // Get initial state immediately
-    checkForMediaChanges()
-
-    // Start periodic polling with timer
-    timer = Timer.scheduledTimer(withTimeInterval: pollingInterval, repeats: true) {
-      [weak self] _ in
-      self?.checkForMediaChanges()
+    // Fallback: poll every second
+    timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+      guard let self = self else { return }
+      guard let info = self.getMediaInfo() else { return }
+      self.emitIfChanged(info)
     }
-
-    debugPrint("[CLIMediaInfoProvider] ✅ Timer started with \(pollingInterval)s interval")
-
+    if let timer = timer {
+      RunLoop.main.add(timer, forMode: .common)
+      print("✅ [CLIMediaInfoProvider] Polling timer started")
+    }
   }
 
   func stopMonitoring() {
+    print("🛑 [CLIMediaInfoProvider] Stopping monitoring...")
 
-    debugPrint("[CLIMediaInfoProvider] 🛑 Stopping monitoring...")
+    // Stop stream if running
+    if isStreaming {
+      isStreaming = false
+    }
 
-    isMonitoring = false
-    timer?.invalidate()
-    timer = nil
-    callback = nil
-    lastMediaInfo = nil
+    if let handle = streamStdout {
+      handle.readabilityHandler = nil
+    }
+    streamStdout = nil
 
-    // Kill any running process with more aggressive cleanup
-    processLock.lock()
-    if let process = currentProcess, process.isRunning {
-
-      debugPrint(
-        "[CLIMediaInfoProvider] Terminating running process PID: \(process.processIdentifier)")
-
-      process.terminate()
-
-      // Give it a moment to terminate gracefully, then force kill if needed
-      DispatchQueue.global().asyncAfter(deadline: .now() + processTerminationDelay) {
-        if process.isRunning {
-
-          debugPrint(
-            "[CLIMediaInfoProvider] Force killing process PID: \(process.processIdentifier)")
-
-          process.interrupt()
-        }
+    if let process = streamProcess {
+      if process.isRunning {
+        process.terminate()
       }
     }
-    currentProcess = nil
-    processLock.unlock()
-    consecutiveFailures = 0
+    streamProcess = nil
+    streamBuffer.removeAll(keepingCapacity: false)
 
-    debugPrint("[CLIMediaInfoProvider] ✅ Monitoring stopped and resources cleaned up")
+    if timer != nil {
+      timer?.invalidate()
+      timer = nil
+    }
 
+    callback = nil
+    lastSnapshotKey = nil
   }
 
   func getMediaInfo() -> MediaInfo? {
-    return lastMediaInfo
-  }
+    guard let exec = findMediaControlExecutable() else { return nil }
 
-  deinit {
-    stopMonitoring()
-  }
-
-  // MARK: - Private Methods
-
-  /// Safely cleanup file handles by setting readability handlers to nil
-  private func cleanupFileHandles(_ outputHandle: FileHandle, _ errorHandle: FileHandle) {
-    outputHandle.readabilityHandler = nil
-    errorHandle.readabilityHandler = nil
-  }
-
-  /// Reset failure counters - useful after system wake or external restart
-  func resetFailureCounter() {
-    consecutiveFailures = 0
-    debugPrint("[CLIMediaInfoProvider] Failure counter reset")
-  }
-
-  private func checkForMediaChanges() {
-
-    debugPrint("[CLIMediaInfoProvider] Starting media check...")
-
-    // Check if we've hit too many consecutive failures
-    if consecutiveFailures >= maxConsecutiveFailures {
-
-      debugPrint(
-        "[CLIMediaInfoProvider] ❌ Too many consecutive failures (\(consecutiveFailures)), pausing checks"
-      )
-
-      // Reset the counter after a longer delay
-      DispatchQueue.main.asyncAfter(deadline: .now() + failureResetDelay) { [weak self] in
-        self?.consecutiveFailures = 0
-
-        debugPrint("[CLIMediaInfoProvider] Resetting failure counter after delay")
-
-      }
-      return
+    // Execute: media-control get
+    guard let outputData = runProcess(execPath: exec, arguments: ["get"]) else {
+      consecutiveFailures += 1
+      return nil
     }
 
-    // Skip if a process is already running
-    processLock.lock()
-    if let process = currentProcess, process.isRunning {
-      processLock.unlock()
+    // Parse JSON output into MediaInfo
+    do {
+      let json = try JSONSerialization.jsonObject(with: outputData, options: [])
+      guard let dict = json as? [String: Any] else { return nil }
 
-      debugPrint("[CLIMediaInfoProvider] ⚠️ Previous process still running, skipping this check")
+      // If the tool reports nothing playing, prefer returning nil
+      // Common flags: playing/state
+      let playing: Bool = {
+        if let v = dict["playing"] as? Bool { return v }
+        if let s = dict["state"] as? String { return s.lowercased() == "playing" }
+        return false
+      }()
 
-      return
-    }
-    processLock.unlock()
+      // Extract fields with flexible key mapping
+      let name = (dict["name"] as? String) ?? (dict["title"] as? String)
+      let artist = (dict["artist"] as? String) ?? (dict["author"] as? String)
+      let album = dict["album"] as? String
 
-    // Execute CLI asynchronously to avoid blocking the timer
-    executeMediaRemoteAdapterAsync { [weak self] mediaInfo in
-      guard let self = self else {
-
-        debugPrint("[CLIMediaInfoProvider] Self was deallocated during async execution")
-
-        return
-      }
-
-      debugPrint(
-        "[CLIMediaInfoProvider] CLI execution completed, mediaInfo: \(mediaInfo != nil ? "✅" : "❌")"
-      )
-
-      // Update failure counter
-      if mediaInfo != nil {
-        self.consecutiveFailures = 0
-      } else {
-        self.consecutiveFailures += 1
-
-        debugPrint("[CLIMediaInfoProvider] Consecutive failures: \(self.consecutiveFailures)")
-
-      }
-
-      // Check if this is a significant change
-      let hasChanged = self.hasSignificantChange(from: self.lastMediaInfo, to: mediaInfo)
-
-      debugPrint("[CLIMediaInfoProvider] Has significant change: \(hasChanged)")
-
-      self.lastMediaInfo = mediaInfo
-
-      if hasChanged, let mediaInfo = mediaInfo {
-
-        debugPrint(
-          "[CLIMediaInfoProvider] Triggering callback with media: \(mediaInfo.name ?? "unknown")")
-
-        DispatchQueue.main.async {
-          self.callback?(mediaInfo)
-        }
-      } else {
-
-        debugPrint(
-          "[CLIMediaInfoProvider] No callback triggered - hasChanged: \(hasChanged), mediaInfo exists: \(mediaInfo != nil)"
-        )
-
-      }
-    }
-  }
-
-  private func executeMediaRemoteAdapterAsync(completion: @escaping (MediaInfo?) -> Void) {
-
-    debugPrint("[CLIMediaInfoProvider] Starting async CLI execution...")
-
-    processQueue.async(flags: .barrier) { [weak self] in
-      guard let self = self else {
-
-        debugPrint("[CLIMediaInfoProvider] Self deallocated in async block")
-
-        completion(nil)
-        return
-      }
-
-      debugPrint("[CLIMediaInfoProvider] In background queue, finding executable...")
-
-      // Find the mediaremote-adapter executable
-      guard let executablePath = self.findMediaRemoteAdapter() else {
-
-        debugPrint("[CLIMediaInfoProvider] ❌ media-control not found")
-
-        completion(nil)
-        return
-      }
-
-      debugPrint("[CLIMediaInfoProvider] ✅ Found executable at: \(executablePath)")
-
-      let process = Process()
-      let outputPipe = Pipe()
-      let errorPipe = Pipe()
-
-      // Configure process for media-control binary
-      process.executableURL = URL(fileURLWithPath: executablePath)
-      process.arguments = [Constants.mediaControlCommand]
-
-      debugPrint(
-        "[CLIMediaInfoProvider] Configured media-control process: \(executablePath) get")
-
-      process.standardOutput = outputPipe
-      process.standardError = errorPipe
-
-      // Set up data accumulation buffers
-      var outputData = Data()
-      var errorData = Data()
-      let dataLock = NSLock()
-
-      // Set up non-blocking data reading
-      let outputHandle = outputPipe.fileHandleForReading
-      let errorHandle = errorPipe.fileHandleForReading
-
-      // Configure file handles for non-blocking reads
-      outputHandle.readabilityHandler = { handle in
-        let data = handle.availableData
-        dataLock.lock()
-        outputData.append(data)
-        dataLock.unlock()
-
-        debugPrint(
-          "[CLIMediaInfoProvider] Read \(data.count) bytes from stdout (total: \(outputData.count))"
-        )
-
-      }
-
-      errorHandle.readabilityHandler = { handle in
-        let data = handle.availableData
-        dataLock.lock()
-        errorData.append(data)
-        dataLock.unlock()
-
-        if !data.isEmpty, let errorString = String(data: data, encoding: .utf8) {
-          debugPrint("[CLIMediaInfoProvider] Error output: \(errorString)")
-        }
-
-      }
-
-      do {
-
-        debugPrint("[CLIMediaInfoProvider] Attempting to run process...")
-
-        // Store the process reference
-        self.processLock.lock()
-        self.currentProcess = process
-        self.processLock.unlock()
-
-        try process.run()
-
-        // Verify process actually started
-        guard process.isRunning else {
-
-          debugPrint("[CLIMediaInfoProvider] ❌ Process failed to start")
-
-          self.processLock.lock()
-          self.currentProcess = nil
-          self.processLock.unlock()
-          completion(nil)
-          return
-        }
-
-        debugPrint(
-          "[CLIMediaInfoProvider] ✅ Process started successfully, PID: \(process.processIdentifier)"
-        )
-
-        // Set up timeout using DispatchSourceTimer (works in background queues)
-
-        debugPrint("[CLIMediaInfoProvider] Setting up \(self.cliTimeout)-second timeout timer...")
-
-        let timeoutTimer = DispatchSource.makeTimerSource(queue: self.processQueue)
-        var hasTimedOut = false
-        var hasCompleted = false
-        let completionLock = NSLock()
-
-        timeoutTimer.schedule(deadline: .now() + self.cliTimeout)
-        timeoutTimer.setEventHandler { [weak self] in
-          completionLock.lock()
-          guard !hasCompleted else {
-            completionLock.unlock()
-            return
-          }
-          hasTimedOut = true
-          hasCompleted = true
-          completionLock.unlock()
-
-          debugPrint("[CLIMediaInfoProvider] ⏰ Timeout triggered!")
-
-          // Clean up file handles
-          self?.cleanupFileHandles(outputHandle, errorHandle)
-
-          self?.processLock.lock()
-          if let currentProcess = self?.currentProcess,
-            currentProcess.processIdentifier == process.processIdentifier
-          {
-            if process.isRunning {
-
-              debugPrint("[CLIMediaInfoProvider] Process still running, terminating...")
-
-              process.terminate()
-              // Give it a moment to terminate gracefully
-              let delay = self?.forceKillDelay ?? 0.5
-              DispatchQueue.global().asyncAfter(deadline: .now() + delay) {
-                if process.isRunning {
-
-                  debugPrint("[CLIMediaInfoProvider] Force killing process")
-
-                  process.interrupt()
-                }
-              }
+      // Durations/positions may come as number or string
+      func numberValue(_ any: Any?) -> Double? {
+        if let n = any as? NSNumber { return n.doubleValue }
+        if let d = any as? Double { return d }
+        if let i = any as? Int { return Double(i) }
+        if let s = any as? String {
+          // Try parsing seconds from common formats (e.g., "123.45")
+          if let v = Double(s) { return v }
+          // Try mm:ss or hh:mm:ss
+          let parts = s.split(separator: ":").reversed()
+          var mul = 1.0
+          var total = 0.0
+          for p in parts {
+            if let v = Double(p.replacingOccurrences(of: ",", with: ".")) {
+              total += v * mul
+              mul *= 60
             } else {
-
-              debugPrint("[CLIMediaInfoProvider] Process already finished when timeout triggered")
-
+              return nil
             }
-            self?.currentProcess = nil
           }
-          self?.processLock.unlock()
-
-          completion(nil)
-          timeoutTimer.cancel()
+          return total
         }
-        timeoutTimer.resume()
-        debugPrint("[CLIMediaInfoProvider] Timeout timer started")
-
-        // Use terminationHandler for async completion
-        debugPrint("[CLIMediaInfoProvider] Setting up termination handler...")
-        process.terminationHandler = { [weak self] terminatedProcess in
-          completionLock.lock()
-          guard !hasCompleted else {
-            completionLock.unlock()
-
-            debugPrint("[CLIMediaInfoProvider] Termination handler called but already completed")
-
-            return
-          }
-          hasCompleted = true
-          completionLock.unlock()
-
-          debugPrint(
-            "[CLIMediaInfoProvider] 🎯 Termination handler called! Status: \(terminatedProcess.terminationStatus)"
-          )
-          timeoutTimer.cancel()
-
-          // Clean up file handles
-          self?.cleanupFileHandles(outputHandle, errorHandle)
-
-          // Clear the current process reference
-          self?.processLock.lock()
-          if self?.currentProcess?.processIdentifier == terminatedProcess.processIdentifier {
-            self?.currentProcess = nil
-          }
-          self?.processLock.unlock()
-
-          // Don't process if we already timed out
-          guard !hasTimedOut else {
-            debugPrint("[CLIMediaInfoProvider] Ignoring termination handler - already timed out")
-            return
-          }
-
-          guard terminatedProcess.terminationStatus == 0 else {
-            debugPrint(
-              "[CLIMediaInfoProvider] ❌ Process failed with status: \(terminatedProcess.terminationStatus)"
-            )
-
-            // Log error output if available
-            dataLock.lock()
-            if !errorData.isEmpty, let errorString = String(data: errorData, encoding: .utf8) {
-              debugPrint("[CLIMediaInfoProvider] Error details: \(errorString)")
-            }
-            dataLock.unlock()
-
-            completion(nil)
-            return
-          }
-
-          debugPrint("[CLIMediaInfoProvider] ✅ Process completed successfully, processing data...")
-
-          // Get the final output data
-          dataLock.lock()
-          let finalOutputData = outputData
-          dataLock.unlock()
-
-          debugPrint("[CLIMediaInfoProvider] Read \(finalOutputData.count) bytes of data")
-
-          let mediaInfo = self?.parseJSONOutput(finalOutputData)
-          debugPrint("[CLIMediaInfoProvider] Parsed media info: \(mediaInfo != nil ? "✅" : "❌")")
-
-          completion(mediaInfo)
-        }
-        debugPrint("[CLIMediaInfoProvider] Termination handler set, waiting for completion...")
-
-      } catch {
-        debugPrint("[CLIMediaInfoProvider] ❌ Failed to execute process: \(error)")
-
-        // Clean up file handles
-        self.cleanupFileHandles(outputHandle, errorHandle)
-
-        // Clear the process reference on error
-        self.processLock.lock()
-        self.currentProcess = nil
-        self.processLock.unlock()
-
-        completion(nil)
+        return nil
       }
+
+      let duration =
+        numberValue(dict["duration"]) ?? numberValue(dict["durationSeconds"]) ?? numberValue(
+          dict["length"]) ?? 0
+
+      let elapsed =
+        numberValue(dict["elapsedTime"]) ?? numberValue(dict["elapsed"]) ?? numberValue(
+          dict["position"]) ?? numberValue(dict["progressSeconds"]) ?? 0
+
+      // Process info
+      let pid =
+        (dict["pid"] as? Int) ?? (dict["processID"] as? Int) ?? (dict["processId"] as? Int) ?? 0
+      var processName = (dict["app"] as? String) ?? (dict["process"] as? String) ?? ""
+      var executablePath = (dict["executablePath"] as? String) ?? (dict["path"] as? String) ?? ""
+
+      // Artwork may be base64 in various keys; ignore non-base64 URL forms here
+      let imageBase64 =
+        (dict["artwork"] as? String) ?? (dict["image"] as? String)
+        ?? (dict["artworkData"] as? String)
+
+      // Fallback to NSRunningApplication for richer process info
+      if pid != 0 {
+        if let app = NSRunningApplication(processIdentifier: pid_t(pid)) {
+          if processName.isEmpty { processName = app.localizedName ?? processName }
+          if executablePath.isEmpty { executablePath = app.executableURL?.path ?? executablePath }
+        }
+      }
+
+      // Application identifier
+      let explicitBundleId = (dict["bundleId"] as? String) ?? (dict["bundleIdentifier"] as? String)
+      let applicationIdentifier =
+        explicitBundleId ?? AppUtility.getBundleIdentifierForPID(pid_t(pid))
+
+      // If no track name and not playing, treat as no media
+      if name == nil && !playing {
+        return nil
+      }
+
+      consecutiveFailures = 0
+      return MediaInfo(
+        name: name,
+        artist: artist,
+        album: album,
+        image: imageBase64,
+        duration: duration,
+        elapsedTime: elapsed,
+        processID: pid,
+        processName: processName,
+        executablePath: executablePath,
+        playing: playing,
+        applicationIdentifier: applicationIdentifier
+      )
+    } catch {
+      // Malformed output
+      consecutiveFailures += 1
+      return nil
     }
   }
 
-  private func hasSignificantChange(from old: MediaInfo?, to new: MediaInfo?) -> Bool {
-    guard let old = old, let new = new else {
-      return new != nil  // Return true if we have new data
-    }
+  // MARK: - CLI helpers
 
-    return old.name != new.name || old.artist != new.artist || old.playing != new.playing
-      || abs(old.elapsedTime - new.elapsedTime) > Constants.elapsedTimeThreshold
-  }
-
-  private func findMediaRemoteAdapter() -> String? {
-    // Only check for media-control binary paths
+  /// Locate the media-control binary by checking common Homebrew paths and PATH
+  private func findMediaControlExecutable() -> String? {
+    // Check common install locations first
     let mediaControlPaths = [
       "/opt/homebrew/bin/media-control",
       "/usr/local/bin/media-control",
     ]
-
-    return mediaControlPaths.first { FileManager.default.fileExists(atPath: $0) }
-  }
-
-  private func parseJSONOutput(_ data: Data) -> MediaInfo? {
-    debugPrint("[CLIMediaInfoProvider] Parsing JSON output...")
-
-    guard !data.isEmpty else {
-      debugPrint("[CLIMediaInfoProvider] ❌ Empty data received")
-      return nil
+    if let p = mediaControlPaths.first(where: { FileManager.default.fileExists(atPath: $0) }) {
+      return p
     }
 
-    // Debug: Print raw data as string
-    if let rawString = String(data: data, encoding: .utf8) {
-      debugPrint(
-        "[CLIMediaInfoProvider] Raw JSON data: \(rawString.prefix(Constants.jsonPreviewLength))...")
-    }
-
-    do {
-      guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-
-        debugPrint("[CLIMediaInfoProvider] ❌ Failed to parse as JSON dictionary")
-
-        return nil
-      }
-
-      debugPrint("[CLIMediaInfoProvider] ✅ Successfully parsed JSON with \(json.keys.count) keys")
-      debugPrint("[CLIMediaInfoProvider] JSON keys: \(json.keys.sorted())")
-
-      // Parse basic media information from the actual output format
-      let title = json["title"] as? String
-      let artist = json["artist"] as? String
-      let album = json["album"] as? String
-      let duration = json["duration"] as? Double ?? 0
-      let elapsedTime = json["elapsedTime"] as? Double ?? 0
-      let playing = json["playing"] as? Bool ?? false
-      let bundleID = json["bundleIdentifier"] as? String
-
-      debugPrint(
-        "[CLIMediaInfoProvider] Parsed fields - title: \(title ?? "nil"), artist: \(artist ?? "nil"), playing: \(playing), bundleID: \(bundleID ?? "nil")"
-      )
-
-      // Try to get process ID and name from bundle identifier
-      var processID = 0
-      var processName = ""
-      var executablePath = ""
-
-      if let bundleID = bundleID {
-        if let app = NSWorkspace.shared.runningApplications.first(where: {
-          $0.bundleIdentifier == bundleID
-        }) {
-          processID = Int(app.processIdentifier)
-          processName = app.localizedName ?? ""
-          executablePath = app.executableURL?.path ?? ""
-
-          debugPrint(
-            "[CLIMediaInfoProvider] Found app info - PID: \(processID), name: \(processName)")
-
-        } else {
-
-          debugPrint("[CLIMediaInfoProvider] ⚠️ No running app found for bundle ID: \(bundleID)")
-
+    // Search in PATH
+    if let pathEnv = ProcessInfo.processInfo.environment["PATH"] {
+      for dir in pathEnv.split(separator: ":") {
+        let candidate = String(dir) + "/media-control"
+        if FileManager.default.fileExists(atPath: candidate) {
+          return candidate
         }
       }
+    }
+    return nil
+  }
 
-      // Handle artwork data - it's already base64 encoded in the output
-      let artworkBase64 = json["artworkData"] as? String ?? ""
+  private func runProcess(execPath: String, arguments: [String]) -> Data? {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: execPath)
+    process.arguments = arguments
 
-      debugPrint("[CLIMediaInfoProvider] Artwork data length: \(artworkBase64.count) characters")
+    let outputPipe = Pipe()
+    process.standardOutput = outputPipe
+    process.standardError = Pipe()
 
-      let mediaInfo = MediaInfo(
-        name: title,
-        artist: artist,
-        album: album,
-        image: artworkBase64,
-        duration: duration,
-        elapsedTime: elapsedTime,
-        processID: processID,
-        processName: processName,
-        executablePath: executablePath,
-        playing: playing,
-        applicationIdentifier: bundleID
-      )
-
-      debugPrint("[CLIMediaInfoProvider] ✅ Created MediaInfo successfully")
-
-      return mediaInfo
-
+    do {
+      try process.run()
     } catch {
-
-      debugPrint("[CLIMediaInfoProvider] ❌ JSON parsing error: \(error)")
-
       return nil
+    }
+
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else { return nil }
+    return outputPipe.fileHandleForReading.readDataToEndOfFile()
+  }
+
+  // MARK: - Streaming
+
+  private func startStream() -> Bool {
+
+    guard let exec = findMediaControlExecutable() else {
+      return false
+    }
+
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: exec)
+    process.arguments = ["stream", "--micros"]
+
+    let outputPipe = Pipe()
+    process.standardOutput = outputPipe
+    process.standardError = Pipe()
+
+    do {
+      try process.run()
+    } catch {
+      return false
+    }
+
+    streamProcess = process
+    streamStdout = outputPipe.fileHandleForReading
+    isStreaming = true
+
+    streamStdout?.readabilityHandler = { [weak self] handle in
+      guard let self = self else { return }
+      let data = handle.availableData
+
+      if data.isEmpty {
+        return
+      }
+
+      self.streamQueue.async {
+        self.streamBuffer.append(data)
+
+        var lineCount = 0
+        // Split by newlines (JSONL)
+        while let range = self.streamBuffer.firstRange(of: Data([0x0a])) {  // '\n'
+          let lineData = self.streamBuffer.subdata(in: 0..<range.lowerBound)
+          self.streamBuffer.removeSubrange(0..<(range.upperBound))
+          lineCount += 1
+          self.handleStreamLine(lineData)
+        }
+      }
+    }
+
+    return true
+  }
+
+  private func handleStreamLine(_ lineData: Data) {
+    guard isStreaming else {
+      return
+    }
+    guard !lineData.isEmpty else {
+      return
+    }
+
+    // Parse line JSON: { diff: bool, payload: { ... } }
+    guard
+      let obj = try? JSONSerialization.jsonObject(with: lineData, options: []),
+      let dict = obj as? [String: Any]
+    else { return }
+
+    let payload = (dict["payload"] as? [String: Any]) ?? [:]
+    let isEmpty = (dict["diff"] as? Bool) == false && payload.isEmpty
+
+    // Maintain a live state dictionary
+    if isEmpty {
+      liveState = [:]
+    } else {
+      // Remove nils and merge
+      var filtered: [String: Any] = [:]
+      for (k, v) in payload {
+        if !(v is NSNull) { filtered[k] = v }
+      }
+      for (k, v) in filtered { liveState[k] = v }
+    }
+
+    if let info = buildMediaInfoFromLiveState() {
+      print(
+        "✅ [CLIMediaInfoProvider] Built MediaInfo: \(info.name ?? "nil") by \(info.artist ?? "nil") - playing: \(info.playing)"
+      )
+      lastInfo = info
+      emitIfChanged(info)
+    } else {
+      print("⚠️ [CLIMediaInfoProvider] Could not build MediaInfo from current live state")
     }
   }
 
-  // MARK: - Helper Methods
+  // Keep last received fields from stream
+  private var liveState: [String: Any] = [:]
 
-  public static func isMediaControlInstalled() -> Bool {
-    let provider = CLIMediaInfoProvider()
-    let path = provider.findMediaRemoteAdapter()
-    // Check if media-control binary is installed
-    return path != nil && FileManager.default.fileExists(atPath: path!)
+  private func buildMediaInfoFromLiveState() -> MediaInfo? {
+    // Extract using micros fields when present
+    let title = (liveState["title"] as? String) ?? (liveState["name"] as? String)
+    let artist = liveState["artist"] as? String
+    let album = liveState["album"] as? String
+    let playing = (liveState["playing"] as? Bool) ?? false
+
+    // Micros-based timing
+    func int64(_ any: Any?) -> Int64? {
+      if let n = any as? NSNumber { return n.int64Value }
+      if let i = any as? Int { return Int64(i) }
+      if let l = any as? Int64 { return l }
+      if let s = any as? String, let v = Int64(s) { return v }
+      return nil
+    }
+
+    let durationMicros = int64(liveState["durationMicros"]) ?? 0
+    let elapsedMicrosBase = int64(liveState["elapsedTimeMicros"]) ?? 0
+    let timestampMicros = int64(liveState["timestampEpochMicros"]) ?? 0
+
+    // Compute elapsed now
+    var elapsedSeconds: Double = 0
+    if elapsedMicrosBase > 0 {
+      var micros = elapsedMicrosBase
+      if playing, timestampMicros > 0 {
+        let nowMicros = Int64(Date().timeIntervalSince1970 * 1_000_000)
+        let delta = max(0, nowMicros - timestampMicros)
+        micros += delta
+      }
+      elapsedSeconds = Double(micros) / 1_000_000.0
+    }
+
+    let durationSeconds = Double(max(0, durationMicros)) / 1_000_000.0
+
+    // Process info
+    let pid = (liveState["pid"] as? Int) ?? (liveState["processID"] as? Int) ?? 0
+    var processName = (liveState["app"] as? String) ?? (liveState["process"] as? String) ?? ""
+    var executablePath =
+      (liveState["path"] as? String) ?? (liveState["executablePath"] as? String) ?? ""
+    if pid != 0 {
+      if let app = NSRunningApplication(processIdentifier: pid_t(pid)) {
+        if processName.isEmpty { processName = app.localizedName ?? processName }
+        if executablePath.isEmpty { executablePath = app.executableURL?.path ?? executablePath }
+      }
+    }
+
+    let bundleId = (liveState["bundleId"] as? String) ?? (liveState["bundleIdentifier"] as? String)
+    let applicationIdentifier = bundleId ?? AppUtility.getBundleIdentifierForPID(pid_t(pid))
+
+    // Artwork may not be provided by stream; keep nil unless present
+    let imageBase64 = (liveState["artwork"] as? String) ?? (liveState["image"] as? String)
+
+    if title == nil && !playing {
+      return nil
+    }
+
+    return MediaInfo(
+      name: title,
+      artist: artist,
+      album: album,
+      image: imageBase64,
+      duration: durationSeconds,
+      elapsedTime: elapsedSeconds,
+      processID: pid,
+      processName: processName,
+      executablePath: executablePath,
+      playing: playing,
+      applicationIdentifier: applicationIdentifier
+    )
   }
 
+  private func emitIfChanged(_ info: MediaInfo) {
+    let key = "\(info.name ?? "")|\(info.artist ?? "")|\(info.playing)|\(info.processID)"
+
+    if key != self.lastSnapshotKey {
+      print("🔔 [CLIMediaInfoProvider] Media state changed, emitting callback")
+      print("   Previous key: \(self.lastSnapshotKey ?? "nil")")
+      print("   New key: \(key)")
+      print("   Track: \(info.name ?? "nil") by \(info.artist ?? "nil")")
+      print("   Playing: \(info.playing), PID: \(info.processID)")
+
+      self.lastSnapshotKey = key
+      if let cb = self.callback {
+        print("📞 [CLIMediaInfoProvider] Dispatching callback to main queue")
+        DispatchQueue.main.async {
+          cb(info)
+        }
+      } else {
+        print("⚠️ [CLIMediaInfoProvider] No callback registered, skipping emission")
+      }
+    } else {
+      print("🔄 [CLIMediaInfoProvider] Media state unchanged, skipping callback")
+    }
+  }
 }
