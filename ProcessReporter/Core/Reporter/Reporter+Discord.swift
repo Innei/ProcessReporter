@@ -16,6 +16,7 @@ private struct DiscordPresence {
     var largeImageText: String?
     var smallImageKey: String?
     var smallImageText: String?
+    var buttons: [DiscordButton]? = nil
 }
 
 class DiscordReporterExtension: ReporterExtension {
@@ -71,6 +72,11 @@ class DiscordReporterExtension: ReporterExtension {
                 presence.largeImageKey = cfg.customLargeImageKey
                 presence.largeImageText = cfg.customLargeImageText.isEmpty ? data.mediaProcessName : cfg.customLargeImageText
             }
+
+            // Dynamic player icon on small image, fallback to brand
+            if let dynamicKey = Self.dynamicSmallImageKey(for: data.mediaProcessName) {
+                presence.smallImageKey = dynamicKey
+            }
         } else if cfg.showProcessInfo, let processName = data.processName {
             presence.details = processName
             presence.state = data.windowTitle
@@ -88,11 +94,40 @@ class DiscordReporterExtension: ReporterExtension {
             return nil
         }
 
-        // Always attach branding small image (asset key)
-        presence.smallImageKey = cfg.brandSmallImageKey.isEmpty ? "processreporter" : cfg.brandSmallImageKey
+        // Attach branding small image if not already set by dynamic mapping
+        if presence.smallImageKey == nil || presence.smallImageKey!.isEmpty {
+            presence.smallImageKey = cfg.brandSmallImageKey.isEmpty ? "processreporter" : cfg.brandSmallImageKey
+        }
         presence.smallImageText = "ProcessReporter"
 
+        // Optional buttons
+        if cfg.enableButtons, !cfg.buttonLabel.isEmpty, !cfg.buttonUrl.isEmpty {
+            presence.buttons = [DiscordButton(label: cfg.buttonLabel, url: cfg.buttonUrl)]
+        }
+
         return presence
+    }
+
+    private static func dynamicSmallImageKey(for mediaProcessName: String?) -> String? {
+        guard let name = mediaProcessName?.lowercased(), !name.isEmpty else { return nil }
+        // Known mappings -> asset keys that user should upload in Discord Dev Portal
+        let map: [String: String] = [
+            "spotify": "spotify",
+            "music": "applemusic",       // Apple Music app on macOS
+            "itunes": "applemusic",
+            "neteasemusic": "netease",
+            "网易云音乐": "netease",
+            "qqmusic": "qqmusic",
+            "qq 音乐": "qqmusic",
+            "youtube music": "youtubemusic",
+            "yt music": "youtubemusic",
+            "vlc": "vlc"
+        ]
+        // Find first mapping whose key is contained in the process name
+        for (k, v) in map {
+            if name.contains(k) { return v }
+        }
+        return nil
     }
 
     @MainActor
@@ -118,7 +153,8 @@ class DiscordReporterExtension: ReporterExtension {
             largeImageKey: p.largeImageKey,
             largeImageText: p.largeImageText,
             smallImageKey: p.smallImageKey,
-            smallImageText: p.smallImageText
+            smallImageText: p.smallImageText,
+            buttons: p.buttons
         )
 
         return .success(())

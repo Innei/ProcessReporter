@@ -162,6 +162,11 @@ struct DiscordIntegration: UserDefaultsJSONStorable, DictionaryConvertible {
     var customLargeImageKey: String = ""
     var customLargeImageText: String = ""
     var brandSmallImageKey: String = "processreporter"
+
+    // Buttons (optional, supports one configurable button)
+    var enableButtons: Bool = false
+    var buttonLabel: String = ""
+    var buttonUrl: String = ""
 }
 
 extension DiscordIntegration {
@@ -177,6 +182,9 @@ extension DiscordIntegration {
         integration.customLargeImageKey = dict["customLargeImageKey"] as? String ?? ""
         integration.customLargeImageText = dict["customLargeImageText"] as? String ?? ""
         integration.brandSmallImageKey = dict["brandSmallImageKey"] as? String ?? "processreporter"
+        integration.enableButtons = dict["enableButtons"] as? Bool ?? false
+        integration.buttonLabel = dict["buttonLabel"] as? String ?? ""
+        integration.buttonUrl = dict["buttonUrl"] as? String ?? ""
         return integration
     }
 }

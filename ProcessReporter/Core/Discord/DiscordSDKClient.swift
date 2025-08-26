@@ -30,16 +30,35 @@ final class DiscordSDKClient: NSObject, DiscordClient {
         largeImageKey: String?,
         largeImageText: String?,
         smallImageKey: String?,
-        smallImageText: String?
+        smallImageText: String?,
+        buttons: [DiscordButton]?
     ) {
-        bridge.setActivityWithDetails(details,
-                                      state: state,
-                                      startTimestamp: startTimestamp == nil ? nil : NSNumber(value: startTimestamp!),
-                                      endTimestamp: endTimestamp == nil ? nil : NSNumber(value: endTimestamp!),
-                                      largeImageKey: largeImageKey,
-                                      largeImageText: largeImageText,
-                                      smallImageKey: smallImageKey,
-                                      smallImageText: smallImageText)
+        var btnsArray: [[String: String]]? = nil
+        if let buttons, !buttons.isEmpty {
+            btnsArray = buttons.prefix(2).map { ["label": $0.label, "url": $0.url] }
+        }
+
+        if bridge.responds(to: #selector(DiscordSDKBridge.setActivityWithDetails(_:state:startTimestamp:endTimestamp:largeImageKey:largeImageText:smallImageKey:smallImageText:buttons:))) {
+            bridge.setActivityWithDetails(details,
+                                          state: state,
+                                          startTimestamp: startTimestamp == nil ? nil : NSNumber(value: startTimestamp!),
+                                          endTimestamp: endTimestamp == nil ? nil : NSNumber(value: endTimestamp!),
+                                          largeImageKey: largeImageKey,
+                                          largeImageText: largeImageText,
+                                          smallImageKey: smallImageKey,
+                                          smallImageText: smallImageText,
+                                          buttons: btnsArray as NSArray? as? [[String: String]])
+        } else {
+            // Fallback to legacy method without buttons
+            bridge.setActivityWithDetails(details,
+                                          state: state,
+                                          startTimestamp: startTimestamp == nil ? nil : NSNumber(value: startTimestamp!),
+                                          endTimestamp: endTimestamp == nil ? nil : NSNumber(value: endTimestamp!),
+                                          largeImageKey: largeImageKey,
+                                          largeImageText: largeImageText,
+                                          smallImageKey: smallImageKey,
+                                          smallImageText: smallImageText)
+        }
     }
 
     func clearActivity() { bridge.clearActivity() }

@@ -7,6 +7,11 @@
 
 import Foundation
 
+struct DiscordButton {
+    let label: String
+    let url: String
+}
+
 protocol DiscordClient: AnyObject {
     var isConnected: Bool { get }
     func initialize(applicationId: String)
@@ -18,7 +23,8 @@ protocol DiscordClient: AnyObject {
         largeImageKey: String?,
         largeImageText: String?,
         smallImageKey: String?,
-        smallImageText: String?
+        smallImageText: String?,
+        buttons: [DiscordButton]?
     )
     func clearActivity()
     func shutdown()
@@ -41,13 +47,19 @@ final class NoopDiscordClient: DiscordClient {
         largeImageKey: String?,
         largeImageText: String?,
         smallImageKey: String?,
-        smallImageText: String?
+        smallImageText: String?,
+        buttons: [DiscordButton]?
     ) {
         guard isConnected else {
             NSLog("[Discord] Noop client not connected; skipping activity")
             return
         }
-        NSLog("[Discord] Noop setActivity details=\(details ?? "") state=\(state ?? "")")
+        if let buttons, !buttons.isEmpty {
+            let desc = buttons.map { "{label:\($0.label),url:\($0.url)}" }.joined(separator: ",")
+            NSLog("[Discord] Noop setActivity details=\(details ?? "") state=\(state ?? "") buttons=[\(desc)]")
+        } else {
+            NSLog("[Discord] Noop setActivity details=\(details ?? "") state=\(state ?? "")")
+        }
     }
 
     func clearActivity() {
