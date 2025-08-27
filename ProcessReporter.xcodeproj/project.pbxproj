@@ -10,27 +10,28 @@
 		1F1B2FF52DA3B3AB003F298D /* RxCocoa in Frameworks */ = {isa = PBXBuildFile; productRef = 1F1B2FF42DA3B3AB003F298D /* RxCocoa */; };
 		1F1B30112DA3CAAE003F298D /* Alamofire in Frameworks */ = {isa = PBXBuildFile; productRef = 1F1B30102DA3CAAE003F298D /* Alamofire */; };
 		1FD8C8D62DA27E59009F6BCB /* SnapKit in Frameworks */ = {isa = PBXBuildFile; productRef = 1FD8C8D52DA27E59009F6BCB /* SnapKit */; };
-        DCD0000A2E0A100000000001 /* discord_game_sdk.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = DCD000092E0A100000000001 /* discord_game_sdk.dylib */; };
-        DCD0000B2E0A100000000001 /* discord_game_sdk.dylib in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = DCD000092E0A100000000001 /* discord_game_sdk.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		DCD0000A2E0A100000000001 /* discord_game_sdk.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = DCD000092E0A100000000001 /* discord_game_sdk.dylib */; };
+		DCD0000B2E0A100000000001 /* discord_game_sdk.dylib in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = DCD000092E0A100000000001 /* discord_game_sdk.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 /* End PBXBuildFile section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		DCD0000C2E0A100000000001 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				DCD0000B2E0A100000000001 /* discord_game_sdk.dylib in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		1FD8C8BD2DA258F3009F6BCB /* ProcessReporter_DEV.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ProcessReporter_DEV.app; sourceTree = BUILT_PRODUCTS_DIR; };
-        DCD000082E0A100000000001 /* Vendor */ = {isa = PBXGroup; children = (
-                DCD000072E0A100000000001 /* Discord */,
-            ); name = Vendor; sourceTree = "<group>"; };
-        DCD000072E0A100000000001 /* Discord */ = {isa = PBXGroup; children = (
-                DCD000062E0A100000000001 /* README.md */,
-                DCD000052E0A100000000001 /* lib */,
-                DCD000042E0A100000000001 /* include */,
-            ); name = Discord; path = Vendor/Discord; sourceTree = SOURCE_ROOT; };
-        DCD000052E0A100000000001 /* lib */ = {isa = PBXGroup; children = (
-                DCD000092E0A100000000001 /* discord_game_sdk.dylib */,
-            ); path = lib; sourceTree = "<group>"; };
-        DCD000042E0A100000000001 /* include */ = {isa = PBXGroup; children = (
-            ); path = include; sourceTree = "<group>"; };
-        DCD000062E0A100000000001 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
-        DCD000092E0A100000000001 /* discord_game_sdk.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = discord_game_sdk.dylib; path = Vendor/Discord/lib/discord_game_sdk.dylib; sourceTree = SOURCE_ROOT; };
+		DCD000062E0A100000000001 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
+		DCD000092E0A100000000001 /* discord_game_sdk.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = discord_game_sdk.dylib; path = Vendor/Discord/lib/discord_game_sdk.dylib; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -62,7 +63,7 @@
 				1F1B30112DA3CAAE003F298D /* Alamofire in Frameworks */,
 				1F1B2FF52DA3B3AB003F298D /* RxCocoa in Frameworks */,
 				1FD8C8D62DA27E59009F6BCB /* SnapKit in Frameworks */,
-                DCD0000A2E0A100000000001 /* discord_game_sdk.dylib in Frameworks */,
+				DCD0000A2E0A100000000001 /* discord_game_sdk.dylib in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -86,6 +87,40 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		DCD000042E0A100000000001 /* include */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = include;
+			sourceTree = "<group>";
+		};
+		DCD000052E0A100000000001 /* lib */ = {
+			isa = PBXGroup;
+			children = (
+				DCD000092E0A100000000001 /* discord_game_sdk.dylib */,
+			);
+			path = lib;
+			sourceTree = "<group>";
+		};
+		DCD000072E0A100000000001 /* Discord */ = {
+			isa = PBXGroup;
+			children = (
+				DCD000062E0A100000000001 /* README.md */,
+				DCD000052E0A100000000001 /* lib */,
+				DCD000042E0A100000000001 /* include */,
+			);
+			name = Discord;
+			path = Vendor/Discord;
+			sourceTree = SOURCE_ROOT;
+		};
+		DCD000082E0A100000000001 /* Vendor */ = {
+			isa = PBXGroup;
+			children = (
+				DCD000072E0A100000000001 /* Discord */,
+			);
+			name = Vendor;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -96,7 +131,7 @@
 				1FD8C8B92DA258F3009F6BCB /* Sources */,
 				1FD8C8BA2DA258F3009F6BCB /* Frameworks */,
 				1FD8C8BB2DA258F3009F6BCB /* Resources */,
-                DCD0000C2E0A100000000001 /* Embed Frameworks */,
+				DCD0000C2E0A100000000001 /* Embed Frameworks */,
 			);
 			buildRules = (
 			);
@@ -163,20 +198,6 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
-
-/* Begin PBXCopyFilesBuildPhase section */
-        DCD0000C2E0A100000000001 /* Embed Frameworks */ = {
-            isa = PBXCopyFilesBuildPhase;
-            buildActionMask = 2147483647;
-            dstPath = "";
-            dstSubfolderSpec = 10;
-            files = (
-                DCD0000B2E0A100000000001 /* discord_game_sdk.dylib in Embed Frameworks */,
-            );
-            name = "Embed Frameworks";
-            runOnlyForDeploymentPostprocessing = 0;
-        };
-/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		1FD8C8B92DA258F3009F6BCB /* Sources */ = {
@@ -311,6 +332,7 @@
 		1FD8C8CD2DA258F4009F6BCB /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ARCHS = "$(ARCHS_STANDARD)";
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = ProcessReporter/ProcessReporter.entitlements;
@@ -319,7 +341,13 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 7VYQTBFBS5;
 				ENABLE_HARDENED_RUNTIME = YES;
+				EXCLUDED_ARCHS = x86_64;
 				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Vendor/Discord/include",
+					"$(PROJECT_DIR)/Vendor/Discord",
+				);
 				INFOPLIST_FILE = ProcessReporter/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_LSBackgroundOnly = YES;
@@ -329,33 +357,29 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				HEADER_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(PROJECT_DIR)/Vendor/Discord/include",
-					"$(PROJECT_DIR)/Vendor/Discord",
-				);
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(PROJECT_DIR)/Vendor/Discord/lib",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
 				MARKETING_VERSION = 1.5.0;
-				PRODUCT_BUNDLE_IDENTIFIER = dev.innei.ProcessReporterV2;
-				PRODUCT_NAME = "$(TARGET_NAME)_DEV";
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "ProcessReporter/ProcessReporter-Bridging-Header.h";
-				SWIFT_VERSION = 5.0;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lc++",
 					"-lc++abi",
 				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.innei.ProcessReporterV2;
+				PRODUCT_NAME = "$(TARGET_NAME)_DEV";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "ProcessReporter/ProcessReporter-Bridging-Header.h";
+				SWIFT_VERSION = 5.0;
 			};
 			name = Debug;
 		};
 		1FD8C8CE2DA258F4009F6BCB /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ARCHS = "$(ARCHS_STANDARD)";
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = ProcessReporter/ProcessReporter.entitlements;
@@ -364,7 +388,13 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 7VYQTBFBS5;
 				ENABLE_HARDENED_RUNTIME = YES;
+				EXCLUDED_ARCHS = x86_64;
 				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Vendor/Discord/include",
+					"$(PROJECT_DIR)/Vendor/Discord",
+				);
 				INFOPLIST_FILE = ProcessReporter/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_LSBackgroundOnly = YES;
@@ -374,27 +404,22 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				HEADER_SEARCH_PATHS = (
-					"$(inherited)",
-					"$(PROJECT_DIR)/Vendor/Discord/include",
-					"$(PROJECT_DIR)/Vendor/Discord",
-				);
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(PROJECT_DIR)/Vendor/Discord/lib",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
 				MARKETING_VERSION = 1.5.0;
-				PRODUCT_BUNDLE_IDENTIFIER = dev.innei.ProcessReporterV2;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "ProcessReporter/ProcessReporter-Bridging-Header.h";
-				SWIFT_VERSION = 5.0;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-lc++",
 					"-lc++abi",
 				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.innei.ProcessReporterV2;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "ProcessReporter/ProcessReporter-Bridging-Header.h";
+				SWIFT_VERSION = 5.0;
 			};
 			name = Release;
 		};
