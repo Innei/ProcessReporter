@@ -23,8 +23,7 @@ enum IntegrationType: String, CaseIterable {
         case .s3:
             return NSImage(named: "s3")!
         case .discord:
-            // Fallback to a system symbol if asset missing to avoid crash
-            return NSImage(named: "discord") ?? NSImage(systemSymbolName: "bubble.left.and.bubble.right.fill", accessibilityDescription: "Discord")!
+			return NSImage(named: "discord")!
         }
     }
 

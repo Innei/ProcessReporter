@@ -198,7 +198,10 @@ class PreferencesIntegrationDiscordView: IntegrationView {
         cfg.buttonUrl = buttonUrlTextField.stringValue
         PreferencesDataModel.shared.discordIntegration.accept(cfg)
         ToastManager.shared.success("Saved!")
-        updateConnectionStatus()
+		DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+			self?.updateConnectionStatus()
+		}
+        
     }
 
     private func startConnectionStatusTimer() {
