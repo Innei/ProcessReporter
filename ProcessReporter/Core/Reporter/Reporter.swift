@@ -39,20 +39,20 @@ class Reporter {
 		cachedFilteredMediaAppNames.removeAll()
 		mappingCache.removeAll()
 	}
-	
+
 	// Handle wake from sleep - reinitialize components if needed
 	public func handleWakeFromSleep() {
 		print("[Reporter] Handling wake from sleep - reinitializing components...")
-		
+
 		// Clear caches that might be stale after sleep
 		clearCaches()
-		
+
 		// Restart application monitoring if it was active
 		if PreferencesDataModel.shared.isEnabled.value {
 			ApplicationMonitor.shared.startMouseMonitoring()
 			ApplicationMonitor.shared.startWindowFocusMonitoring()
 		}
-		
+
 		print("[Reporter] Wake from sleep handling completed")
 	}
 
@@ -85,7 +85,7 @@ class Reporter {
 		mapping.removeValue(forKey: name)
 	}
 
-    public func send(data: ReportModel) async -> Result<[String], SendError> {
+	public func send(data: ReportModel) async -> Result<[String], SendError> {
 		let results = await withTaskGroup(of: (String, Result<Void, ReporterError>).self) { group in
 			for (name, options) in mapping {
 				group.addTask {
@@ -127,26 +127,26 @@ class Reporter {
 			return true
 		}
 
-        // Persist via DataStore (value-only, no SwiftData leakage)
-        data.integrations = successNames
-        let reportValue = ReportValue(
-            id: data.id,
-            processName: data.processName,
-            windowTitle: data.windowTitle,
-            timeStamp: data.timeStamp,
-            artist: data.artist,
-            mediaName: data.mediaName,
-            mediaProcessName: data.mediaProcessName,
-            mediaDuration: data.mediaDuration,
-            mediaElapsedTime: data.mediaElapsedTime,
-            mediaImageData: data.mediaImageData,
-            integrations: data.integrations
-        )
-        await DataStore.shared.saveReport(reportValue)
+		// Persist via DataStore (value-only, no SwiftData leakage)
+		data.integrations = successNames
+		let reportValue = ReportValue(
+			id: data.id,
+			processName: data.processName,
+			windowTitle: data.windowTitle,
+			timeStamp: data.timeStamp,
+			artist: data.artist,
+			mediaName: data.mediaName,
+			mediaProcessName: data.mediaProcessName,
+			mediaDuration: data.mediaDuration,
+			mediaElapsedTime: data.mediaElapsedTime,
+			mediaImageData: data.mediaImageData,
+			integrations: data.integrations
+		)
+		await DataStore.shared.saveReport(reportValue)
 		let isAllFailed = successNames.isEmpty && !failures.isEmpty
 		if !isAllFailed {
 			statusItemManager.updateLastSendProcessNameItem(data)
-    }
+		}
 
 		if failures.isEmpty {
 			statusItemManager.toggleStatusItemIcon(.syncing)
@@ -255,7 +255,14 @@ class Reporter {
 		if let optionalMediaInfo = optionalMediaInfo {
 			mediaInfo = optionalMediaInfo
 		} else {
-			mediaInfo = MediaInfoManager.getMediaInfo()
+			// Offload to background actor with timeout and coalescing
+			let semaphore = DispatchSemaphore(value: 0)
+			Task.detached(priority: .utility) {
+				let result = try? await MediaInfoManager.getMediaInfoAsync(timeout: 3.0)
+				mediaInfo = result ?? mediaInfo
+				semaphore.signal()
+			}
+			_ = semaphore.wait(timeout: .now() + .milliseconds(150))  // brief wait to reduce UI latency
 		}
 
 		let appName = windowInfo.appName
@@ -349,19 +356,19 @@ class Reporter {
 		subscribeSettingsChanged()
 	}
 
-    private func initializeExtensions() {
-        // Register all reporter extensions
-        let extensions: [ReporterExtension] = [
-            MixSpaceReporterExtension(),
-            S3ReporterExtension(),
-            SlackReporterExtension(),
-            DiscordReporterExtension(),
-        ]
+	private func initializeExtensions() {
+		// Register all reporter extensions
+		let extensions: [ReporterExtension] = [
+			MixSpaceReporterExtension(),
+			S3ReporterExtension(),
+			SlackReporterExtension(),
+			DiscordReporterExtension(),
+		]
 
-        for ext in extensions {
-            registerExtension(ext)
-        }
-    }
+		for ext in extensions {
+			registerExtension(ext)
+		}
+	}
 
 	deinit {
 		for disposer in disposers {
@@ -430,18 +437,18 @@ extension Reporter {
 			}
 		}
 
-        // Subscribe to extension configuration changes
-        let d3 = Observable.combineLatest(
-            preferences.mixSpaceIntegration,
-            preferences.s3Integration,
-            preferences.slackIntegration,
-            preferences.discordIntegration
-        ).subscribe { [weak self] _ in
-            guard let self = self else { return }
-            Task {
-                await self.updateExtensions()
-            }
-        }
+		// Subscribe to extension configuration changes
+		let d3 = Observable.combineLatest(
+			preferences.mixSpaceIntegration,
+			preferences.s3Integration,
+			preferences.slackIntegration,
+			preferences.discordIntegration
+		).subscribe { [weak self] _ in
+			guard let self = self else { return }
+			Task {
+				await self.updateExtensions()
+			}
+		}
 
 		disposers.append(contentsOf: [d1, d2, d3])
 	}

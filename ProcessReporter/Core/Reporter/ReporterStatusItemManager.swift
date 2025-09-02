@@ -258,8 +258,18 @@ extension ReporterStatusItemManager: NSMenuDelegate {
 		guard let info = ApplicationMonitor.shared.getFocusedWindowInfo() else { return }
 		updateCurrentProcessItem(info)
 
-		guard let mediaInfo = MediaInfoManager.getMediaInfo() else { return }
-		updateCurrentMediaItem(mediaInfo)
+		// Fetch media info via async actor with short wait to avoid main-thread blocking
+		var mediaInfo: MediaInfo?
+		let semaphore = DispatchSemaphore(value: 0)
+		Task.detached(priority: .utility) {
+			let result = try? await MediaInfoManager.getMediaInfoAsync(timeout: 3.0)
+			mediaInfo = result ?? mediaInfo
+			semaphore.signal()
+		}
+		_ = semaphore.wait(timeout: .now() + .milliseconds(150))
+		if let mediaInfo = mediaInfo ?? MediaInfoManager.getMediaInfo() {
+			updateCurrentMediaItem(mediaInfo)
+		}
 	}
 }
 

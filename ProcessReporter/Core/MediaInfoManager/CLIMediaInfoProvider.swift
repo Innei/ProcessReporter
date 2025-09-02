@@ -29,6 +29,7 @@ class CLIMediaInfoProvider: MediaInfoProvider {
   private var streamBuffer = Data()
   private let streamQueue = DispatchQueue(label: "media-control.stream.queue")
   private var isStreaming = false
+  private var currentExecProcess: Process?
 
   func resetFailureCounter() {
     consecutiveFailures = 0
@@ -47,8 +48,11 @@ class CLIMediaInfoProvider: MediaInfoProvider {
     // Fallback: poll every second
     timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
       guard let self = self else { return }
-      guard let info = self.getMediaInfo() else { return }
-      self.emitIfChanged(info)
+      // Run CLI polling off the main thread to avoid nested CFRunLoop runs
+      DispatchQueue.global(qos: .utility).async {
+        guard let info = self.getMediaInfo() else { return }
+        self.emitIfChanged(info)
+      }
     }
     if let timer = timer {
       RunLoop.main.add(timer, forMode: .common)
@@ -87,6 +91,17 @@ class CLIMediaInfoProvider: MediaInfoProvider {
   }
 
   func getMediaInfo() -> MediaInfo? {
+    #if DEBUG
+      precondition(
+        !Thread.isMainThread, "CLIMediaInfoProvider.getMediaInfo() must not run on the main thread")
+    #else
+      if Thread.isMainThread {
+        NSLog(
+          "[CLIMediaInfoProvider] getMediaInfo() called on main thread; returning cached/none to prevent blocking"
+        )
+        return nil
+      }
+    #endif
     guard let exec = findMediaControlExecutable() else { return nil }
 
     // Execute: media-control get
@@ -222,6 +237,15 @@ class CLIMediaInfoProvider: MediaInfoProvider {
   }
 
   private func runProcess(execPath: String, arguments: [String]) -> Data? {
+    #if DEBUG
+      precondition(
+        !Thread.isMainThread, "CLIMediaInfoProvider.runProcess must not be called on main thread")
+    #else
+      if Thread.isMainThread {
+        NSLog("[CLIMediaInfoProvider] runProcess on main thread is not allowed; aborting")
+        return nil
+      }
+    #endif
     let process = Process()
     process.executableURL = URL(fileURLWithPath: execPath)
     process.arguments = arguments
@@ -236,9 +260,21 @@ class CLIMediaInfoProvider: MediaInfoProvider {
       return nil
     }
 
+    currentExecProcess = process
+    defer { currentExecProcess = nil }
     process.waitUntilExit()
     guard process.terminationStatus == 0 else { return nil }
     return outputPipe.fileHandleForReading.readDataToEndOfFile()
+  }
+
+  /// Interrupt the currently running exec process, if any, to break potential hangs
+  func interruptCurrentExecProcess() {
+    guard let p = currentExecProcess, p.isRunning else { return }
+    p.interrupt()  // SIGINT
+    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.5) { [weak self] in
+      guard let self = self, let p2 = self.currentExecProcess, p2.isRunning else { return }
+      p2.terminate()  // SIGTERM fallback
+    }
   }
 
   // MARK: - Streaming
