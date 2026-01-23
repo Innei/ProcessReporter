@@ -47,6 +47,16 @@ NS_ASSUME_NONNULL_BEGIN
                 largeImageText:(NSString *_Nullable)largeImageText
                  smallImageKey:(NSString *_Nullable)smallImageKey
                 smallImageText:(NSString *_Nullable)smallImageText
+                       buttons:(NSArray<NSDictionary<NSString *, NSString *> *> *_Nullable)buttons;
+- (void)setActivityWithDetails:(NSString *_Nullable)details
+                         state:(NSString *_Nullable)state
+                   activityType:(NSNumber *_Nullable)activityType
+                startTimestamp:(NSNumber *_Nullable)startTimestamp
+                  endTimestamp:(NSNumber *_Nullable)endTimestamp
+                 largeImageKey:(NSString *_Nullable)largeImageKey
+                largeImageText:(NSString *_Nullable)largeImageText
+                 smallImageKey:(NSString *_Nullable)smallImageKey
+                smallImageText:(NSString *_Nullable)smallImageText
                         buttons:(NSArray<NSDictionary<NSString *, NSString *> *> *_Nullable)buttons;
 - (void)clearActivity;
 - (void)shutdown;

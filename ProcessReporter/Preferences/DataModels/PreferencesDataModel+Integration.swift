@@ -156,6 +156,7 @@ struct DiscordIntegration: UserDefaultsJSONStorable, DictionaryConvertible {
     var showProcessInfo: Bool = true
     var showMediaInfo: Bool = true
     var prioritizeMedia: Bool = true
+    var useListeningForMedia: Bool = true
     var showTimestamps: Bool = true
 
     // Asset keys (must be pre-uploaded in Discord Dev Portal)
@@ -178,6 +179,7 @@ extension DiscordIntegration {
         integration.showProcessInfo = dict["showProcessInfo"] as? Bool ?? true
         integration.showMediaInfo = dict["showMediaInfo"] as? Bool ?? true
         integration.prioritizeMedia = dict["prioritizeMedia"] as? Bool ?? true
+        integration.useListeningForMedia = dict["useListeningForMedia"] as? Bool ?? true
         integration.showTimestamps = dict["showTimestamps"] as? Bool ?? true
         integration.customLargeImageKey = dict["customLargeImageKey"] as? String ?? ""
         integration.customLargeImageText = dict["customLargeImageText"] as? String ?? ""

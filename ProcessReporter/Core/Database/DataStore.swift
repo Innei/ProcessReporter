@@ -38,6 +38,9 @@ struct IconValue {
 actor DataStore {
     static let shared = DataStore()
 
+    // Maximum number of reports to keep (roughly ~10MB with typical report sizes)
+    private let maxReportCount = 5000
+
     // Initialize underlying database/container
     func initialize() async throws {
         try await Database.shared.initialize()
@@ -118,6 +121,9 @@ actor DataStore {
             return
         }
         NotificationCenter.default.post(name: DataStore.changedNotification, object: nil)
+
+        // Check and cleanup if database is too large
+        await cleanupOldRecordsIfNeeded()
     }
 
     // Fetch all icons sorted (value type only)
@@ -236,6 +242,61 @@ actor DataStore {
                     try? context.save()
                 }
             }
+        }
+    }
+
+    // MARK: - Database Size Management
+
+    func cleanupOldRecordsIfNeeded() async {
+        do {
+            let deletedCount = try await Database.shared.performBackgroundTask { [maxReportCount] context in
+                // Get total count
+                let countDescriptor = FetchDescriptor<ReportModel>()
+                let totalCount = try context.fetchCount(countDescriptor)
+
+                guard totalCount > maxReportCount else { return 0 }
+
+                let deleteCount = totalCount - maxReportCount
+
+                // Find the cutoff timestamp: get the Nth oldest record's timestamp
+                var cutoffDescriptor = FetchDescriptor<ReportModel>(
+                    sortBy: [SortDescriptor(\.timeStamp, order: .forward)]
+                )
+                cutoffDescriptor.fetchLimit = 1
+                cutoffDescriptor.fetchOffset = deleteCount - 1
+
+                guard let cutoffReport = try context.fetch(cutoffDescriptor).first else {
+                    return 0
+                }
+                let cutoffDate = cutoffReport.timeStamp
+
+                // Delete all records older than or equal to cutoff date in one operation
+                try context.delete(model: ReportModel.self, where: #Predicate<ReportModel> { report in
+                    report.timeStamp <= cutoffDate
+                })
+
+                try context.save()
+                return deleteCount
+            }
+
+            if deletedCount > 0 {
+                NSLog("Cleaned up \(deletedCount) old reports")
+                NotificationCenter.default.post(name: DataStore.changedNotification, object: nil)
+            }
+        } catch {
+            NSLog("Failed to cleanup old reports: \(error.localizedDescription)")
+        }
+    }
+
+    func getReportCount() async -> Int {
+        do {
+            return try await Database.shared.performBackgroundTask { context in
+                let descriptor = FetchDescriptor<ReportModel>()
+                return try context.fetchCount(descriptor)
+            }
+        } catch {
+            NSLog("getReportCount failed: \(error.localizedDescription)")
+            return 0
         }
     }
 }

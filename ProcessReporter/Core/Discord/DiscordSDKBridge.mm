@@ -154,6 +154,7 @@
   // For backward compatibility, forward to the enhanced API without buttons
   [self setActivityWithDetails:details
                          state:state
+                   activityType:nil
                 startTimestamp:startTimestamp
                   endTimestamp:endTimestamp
                  largeImageKey:largeImageKey
@@ -165,6 +166,28 @@
 
 - (void)setActivityWithDetails:(NSString *)details
                          state:(NSString *)state
+                startTimestamp:(NSNumber *)startTimestamp
+                  endTimestamp:(NSNumber *)endTimestamp
+                 largeImageKey:(NSString *)largeImageKey
+                largeImageText:(NSString *)largeImageText
+                 smallImageKey:(NSString *)smallImageKey
+                smallImageText:(NSString *)smallImageText
+                        buttons:(NSArray<NSDictionary<NSString *, NSString *> *> *)buttons {
+  [self setActivityWithDetails:details
+                         state:state
+                   activityType:nil
+                startTimestamp:startTimestamp
+                  endTimestamp:endTimestamp
+                 largeImageKey:largeImageKey
+                largeImageText:largeImageText
+                 smallImageKey:smallImageKey
+                smallImageText:smallImageText
+                        buttons:buttons];
+}
+
+- (void)setActivityWithDetails:(NSString *)details
+                         state:(NSString *)state
+                   activityType:(NSNumber *)activityType
                 startTimestamp:(NSNumber *)startTimestamp
                   endTimestamp:(NSNumber *)endTimestamp
                  largeImageKey:(NSString *)largeImageKey
@@ -190,6 +213,9 @@
     const char *src = [state UTF8String];
     std::strncpy(buf, src, 127);
     buf[127] = '\0';
+  }
+  if (activityType) {
+    activity.SetType(static_cast<discord::ActivityType>([activityType intValue]));
   }
 
   if (startTimestamp) {
@@ -250,6 +276,10 @@
       strncpy(activity.state, src, sizeof(activity.state) - 1);
       activity.state[sizeof(activity.state) - 1] = '\0';
     }
+  }
+
+  if (activityType) {
+    activity.type = (enum EDiscordActivityType)[activityType intValue];
   }
 
   if (startTimestamp) {
@@ -329,10 +359,10 @@
       _cCore->get_activity_manager(_cCore), &activity, NULL, NULL);
 #else
   if (buttons && buttons.count > 0) {
-    NSLog(@"[Discord SDK Shim] setActivity details=%@ state=%@ buttons=%@", details,
-          state, buttons);
+    NSLog(@"[Discord SDK Shim] setActivity details=%@ state=%@ type=%@ buttons=%@", details,
+          state, activityType, buttons);
   } else {
-    NSLog(@"[Discord SDK Shim] setActivity details=%@ state=%@", details, state);
+    NSLog(@"[Discord SDK Shim] setActivity details=%@ state=%@ type=%@", details, state, activityType);
   }
 #endif
 }

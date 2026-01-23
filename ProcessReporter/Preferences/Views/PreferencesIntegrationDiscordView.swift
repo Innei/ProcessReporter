@@ -6,6 +6,7 @@
 //
 
 import AppKit
+import SnapKit
 
 class PreferencesIntegrationDiscordView: IntegrationView {
     private var connectionStatusTimer: Timer?
@@ -28,6 +29,8 @@ class PreferencesIntegrationDiscordView: IntegrationView {
     private lazy var mediaInfoCheckbox: NSButton = NSButton(
         checkboxWithTitle: "", target: nil, action: nil)
     private lazy var prioritizeMediaCheckbox: NSButton = NSButton(
+        checkboxWithTitle: "", target: nil, action: nil)
+    private lazy var useListeningForMediaCheckbox: NSButton = NSButton(
         checkboxWithTitle: "", target: nil, action: nil)
     private lazy var showTimestampsCheckbox: NSButton = NSButton(
         checkboxWithTitle: "", target: nil, action: nil)
@@ -60,6 +63,26 @@ class PreferencesIntegrationDiscordView: IntegrationView {
         let tf = NSScrollTextField()
         tf.placeholderString = "Brand Small Image Asset Key"
         return tf
+    }()
+
+    private lazy var debugTextView: NSTextView = {
+        let tv = NSTextView()
+        tv.isEditable = false
+        tv.isSelectable = true
+        tv.isRichText = false
+        tv.usesFindBar = true
+        tv.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        tv.backgroundColor = .clear
+        tv.textContainerInset = NSSize(width: 6, height: 6)
+        return tv
+    }()
+
+    private lazy var debugScrollView: NSScrollView = {
+        let sv = NSScrollView()
+        sv.documentView = debugTextView
+        sv.hasVerticalScroller = true
+        sv.borderType = .bezelBorder
+        return sv
     }()
 
     private lazy var saveButton: NSButton = {
@@ -117,6 +140,9 @@ class PreferencesIntegrationDiscordView: IntegrationView {
         createRow(
             leftView: NSTextField(labelWithString: "Prioritize Media"),
             rightView: prioritizeMediaCheckbox)
+        createRow(
+            leftView: NSTextField(labelWithString: "Media Uses Listening"),
+            rightView: useListeningForMediaCheckbox)
 
         // Visual settings
         createRowDescription(
@@ -146,6 +172,16 @@ class PreferencesIntegrationDiscordView: IntegrationView {
             leftView: NSTextField(labelWithString: "Button URL"),
             rightView: buttonUrlTextField)
 
+        // Debug
+        createRowDescription(text: "Debug (updates every 2 seconds)")
+        createRow(
+            leftView: NSTextField(labelWithString: "Debug Info"),
+            rightView: debugScrollView)
+        debugScrollView.snp.makeConstraints { make in
+            make.height.equalTo(160)
+            make.width.greaterThanOrEqualTo(240)
+        }
+
         // Actions
         let buttonStack = NSStackView()
         buttonStack.orientation = .horizontal
@@ -163,6 +199,7 @@ class PreferencesIntegrationDiscordView: IntegrationView {
         processInfoCheckbox.state = cfg.showProcessInfo ? .on : .off
         mediaInfoCheckbox.state = cfg.showMediaInfo ? .on : .off
         prioritizeMediaCheckbox.state = cfg.prioritizeMedia ? .on : .off
+        useListeningForMediaCheckbox.state = cfg.useListeningForMedia ? .on : .off
         showTimestampsCheckbox.state = cfg.showTimestamps ? .on : .off
         customLargeImageKeyTextField.stringValue = cfg.customLargeImageKey
         customLargeImageTextTextField.stringValue = cfg.customLargeImageText
@@ -178,6 +215,7 @@ class PreferencesIntegrationDiscordView: IntegrationView {
         let connected = DiscordClientProvider.shared.isConnected
         connectionStatusLabel.stringValue = connected ? "Connected" : "Not Connected"
         connectionStatusLabel.textColor = connected ? .systemGreen : .systemRed
+        debugTextView.string = DiscordDebugStore.shared.formattedText()
     }
 
     @objc private func reset() { synchronizeUI() }
@@ -189,6 +227,7 @@ class PreferencesIntegrationDiscordView: IntegrationView {
         cfg.showProcessInfo = processInfoCheckbox.state == .on
         cfg.showMediaInfo = mediaInfoCheckbox.state == .on
         cfg.prioritizeMedia = prioritizeMediaCheckbox.state == .on
+        cfg.useListeningForMedia = useListeningForMediaCheckbox.state == .on
         cfg.showTimestamps = showTimestampsCheckbox.state == .on
         cfg.customLargeImageKey = customLargeImageKeyTextField.stringValue
         cfg.customLargeImageText = customLargeImageTextTextField.stringValue

@@ -20,11 +20,15 @@ final class DiscordSDKClient: NSObject, DiscordClient {
     func initialize(applicationId: String) {
         // Use the exact imported selector name for robustness
 		bridge.initialize(withApplicationId: applicationId)
+        DiscordDebugStore.shared.update { snapshot in
+            snapshot.clientKind = "sdk"
+        }
     }
 
     func setActivity(
         details: String?,
         state: String?,
+        activityType: DiscordActivityType?,
         startTimestamp: Int64?,
         endTimestamp: Int64?,
         largeImageKey: String?,
@@ -38,7 +42,18 @@ final class DiscordSDKClient: NSObject, DiscordClient {
             btnsArray = buttons.prefix(2).map { ["label": $0.label, "url": $0.url] }
         }
 
-        if bridge.responds(to: #selector(DiscordSDKBridge.setActivityWithDetails(_:state:startTimestamp:endTimestamp:largeImageKey:largeImageText:smallImageKey:smallImageText:buttons:))) {
+        if bridge.responds(to: #selector(DiscordSDKBridge.setActivityWithDetails(_:state:activityType:startTimestamp:endTimestamp:largeImageKey:largeImageText:smallImageKey:smallImageText:buttons:))) {
+            bridge.setActivityWithDetails(details,
+                                          state: state,
+                                          activityType: activityType == nil ? nil : NSNumber(value: activityType!.rawValue),
+                                          startTimestamp: startTimestamp == nil ? nil : NSNumber(value: startTimestamp!),
+                                          endTimestamp: endTimestamp == nil ? nil : NSNumber(value: endTimestamp!),
+                                          largeImageKey: largeImageKey,
+                                          largeImageText: largeImageText,
+                                          smallImageKey: smallImageKey,
+                                          smallImageText: smallImageText,
+                                          buttons: btnsArray as NSArray? as? [[String: String]])
+        } else if bridge.responds(to: #selector(DiscordSDKBridge.setActivityWithDetails(_:state:startTimestamp:endTimestamp:largeImageKey:largeImageText:smallImageKey:smallImageText:buttons:))) {
             bridge.setActivityWithDetails(details,
                                           state: state,
                                           startTimestamp: startTimestamp == nil ? nil : NSNumber(value: startTimestamp!),
@@ -70,10 +85,22 @@ extension DiscordSDKClient: DiscordSDKBridgeDelegate {
     func discordSDKDidConnect(_ bridge: DiscordSDKBridge) {
         isConnected = true
         NSLog("[Discord] Bridge connected")
+        DiscordDebugStore.shared.update { snapshot in
+            snapshot.clientKind = "sdk"
+            snapshot.isConnected = true
+            snapshot.lastOutcome = "connected"
+            snapshot.lastReason = nil
+        }
     }
 
     func discordSDKDidDisconnect(_ bridge: DiscordSDKBridge, error: Error?) {
         isConnected = false
         NSLog("[Discord] Bridge disconnected: \(error?.localizedDescription ?? "-")")
+        DiscordDebugStore.shared.update { snapshot in
+            snapshot.clientKind = "sdk"
+            snapshot.isConnected = false
+            snapshot.lastOutcome = "disconnected"
+            snapshot.lastReason = error?.localizedDescription
+        }
     }
 }
