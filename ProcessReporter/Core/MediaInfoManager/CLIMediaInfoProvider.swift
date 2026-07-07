@@ -30,6 +30,7 @@ class CLIMediaInfoProvider: MediaInfoProvider {
   private let streamQueue = DispatchQueue(label: "media-control.stream.queue")
   private var isStreaming = false
   private var currentExecProcess: Process?
+  private var streamRestartDelay: TimeInterval = 1.0
 
   func resetFailureCounter() {
     consecutiveFailures = 0
@@ -45,7 +46,12 @@ class CLIMediaInfoProvider: MediaInfoProvider {
       return
     }
 
-    // Fallback: poll every second
+    startPollingFallback()
+  }
+
+  // Fallback: poll every second
+  private func startPollingFallback() {
+    guard timer == nil else { return }
     timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
       guard let self = self else { return }
       // Run CLI polling off the main thread to avoid nested CFRunLoop runs
@@ -74,11 +80,14 @@ class CLIMediaInfoProvider: MediaInfoProvider {
     streamStdout = nil
 
     if let process = streamProcess {
+      // Detach the handler so our own terminate() doesn't schedule a restart
+      process.terminationHandler = nil
       if process.isRunning {
         process.terminate()
       }
     }
     streamProcess = nil
+    streamRestartDelay = 1.0
     streamBuffer.removeAll(keepingCapacity: false)
 
     if timer != nil {
@@ -303,6 +312,12 @@ class CLIMediaInfoProvider: MediaInfoProvider {
     streamStdout = outputPipe.fileHandleForReading
     isStreaming = true
 
+    process.terminationHandler = { [weak self] finished in
+      DispatchQueue.main.async {
+        self?.handleStreamTermination(of: finished)
+      }
+    }
+
     streamStdout?.readabilityHandler = { [weak self] handle in
       guard let self = self else { return }
       let data = handle.availableData
@@ -328,6 +343,33 @@ class CLIMediaInfoProvider: MediaInfoProvider {
     return true
   }
 
+  /// The stream process exited. If we didn't stop it ourselves, restart it
+  /// (with backoff) so monitoring survives crashes of the media-control child
+  /// (e.g. around system sleep) — otherwise media info silently stays frozen
+  /// at the last emitted state until the app is relaunched.
+  private func handleStreamTermination(of process: Process) {
+    guard isStreaming, process === streamProcess else { return }
+    isStreaming = false
+    streamStdout?.readabilityHandler = nil
+    streamStdout = nil
+    streamProcess = nil
+    streamQueue.async { [weak self] in
+      self?.streamBuffer.removeAll(keepingCapacity: false)
+      self?.liveState = [:]
+    }
+
+    let delay = streamRestartDelay
+    streamRestartDelay = min(streamRestartDelay * 2, 60)
+    print("⚠️ [CLIMediaInfoProvider] media-control stream exited, restarting in \(Int(delay))s")
+    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+      guard let self = self, self.callback != nil, self.streamProcess == nil, self.timer == nil
+      else { return }
+      if !self.startStream() {
+        self.startPollingFallback()
+      }
+    }
+  }
+
   private func handleStreamLine(_ lineData: Data) {
     guard isStreaming else {
       return
@@ -343,19 +385,24 @@ class CLIMediaInfoProvider: MediaInfoProvider {
     else { return }
 
     let payload = (dict["payload"] as? [String: Any]) ?? [:]
-    let isEmpty = (dict["diff"] as? Bool) == false && payload.isEmpty
 
-    // Maintain a live state dictionary
-    if isEmpty {
+    // Maintain a live state dictionary. diff == false is a full snapshot
+    // (sent when the session or track changes): replace the whole state so
+    // fields from the previous session don't linger. Within a payload, a
+    // null value means the field was cleared.
+    if (dict["diff"] as? Bool) != true {
       liveState = [:]
-    } else {
-      // Remove nils and merge
-      var filtered: [String: Any] = [:]
-      for (k, v) in payload {
-        if !(v is NSNull) { filtered[k] = v }
-      }
-      for (k, v) in filtered { liveState[k] = v }
     }
+    for (k, v) in payload {
+      if v is NSNull {
+        liveState.removeValue(forKey: k)
+      } else {
+        liveState[k] = v
+      }
+    }
+
+    // Stream is healthy; reset the crash-restart backoff
+    DispatchQueue.main.async { [weak self] in self?.streamRestartDelay = 1.0 }
 
     if let info = buildMediaInfoFromLiveState() {
       print(
@@ -363,6 +410,24 @@ class CLIMediaInfoProvider: MediaInfoProvider {
       )
       lastInfo = info
       emitIfChanged(info)
+    } else if let previous = lastInfo, previous.playing {
+      // The playback session ended (empty snapshot): report the last known
+      // track as stopped so consumers don't keep showing stale media
+      let stopped = MediaInfo(
+        name: previous.name,
+        artist: previous.artist,
+        album: previous.album,
+        image: previous.image,
+        duration: previous.duration,
+        elapsedTime: previous.elapsedTime,
+        processID: previous.processID,
+        processName: previous.processName,
+        executablePath: previous.executablePath,
+        playing: false,
+        applicationIdentifier: previous.applicationIdentifier
+      )
+      lastInfo = stopped
+      emitIfChanged(stopped)
     } else {
       print("⚠️ [CLIMediaInfoProvider] Could not build MediaInfo from current live state")
     }
