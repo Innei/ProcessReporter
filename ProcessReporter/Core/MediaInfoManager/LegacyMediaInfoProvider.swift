@@ -64,8 +64,8 @@ class LegacyMediaInfoProvider: MediaInfoProvider {
     callback = nil
   }
   
-  func getMediaInfo() -> MediaInfo? {
-    guard let nowPlayingInfo = getNowPlayingInfo() else { return nil }
+  func fetchMediaInfo() -> MediaInfoFetchResult {
+    guard let nowPlayingInfo = getNowPlayingInfo() else { return .resolved(nil) }
     
     let name = nowPlayingInfo["name"] as? String
     let artist = nowPlayingInfo["artist"] as? String
@@ -81,11 +81,13 @@ class LegacyMediaInfoProvider: MediaInfoProvider {
     let pid = pid_t(processID)
     let bundleID = AppUtility.getBundleIdentifierForPID(pid)
 
-    return MediaInfo(
-      name: name, artist: artist, album: album, image: artworkData, duration: duration,
-      elapsedTime: elapsedTime, processID: processID, processName: processName,
-      executablePath: executablePath, playing: playing,
-      applicationIdentifier: bundleID
+    return .resolved(
+      MediaInfo(
+        name: name, artist: artist, album: album, image: artworkData, duration: duration,
+        elapsedTime: elapsedTime, processID: processID, processName: processName,
+        executablePath: executablePath, playing: playing,
+        applicationIdentifier: bundleID
+      )
     )
   }
   
@@ -110,7 +112,8 @@ class LegacyMediaInfoProvider: MediaInfoProvider {
       NotificationCenter.default.publisher(for: Notification.Name(name)).sink { _ in
         if let callback = self.callback {
           DispatchQueue.main.async {
-            callback(self.getMediaInfo())
+            guard case .resolved(let info) = self.fetchMediaInfo() else { return }
+            callback(info)
           }
         }
       }.store(in: &cancellables)

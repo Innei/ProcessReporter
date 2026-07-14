@@ -20,7 +20,7 @@ final class AdaptiveMediaInfoProvider: MediaInfoProvider {
   private var authoritativeState = ProviderState.unknown
   private var callback: MediaInfoManager.PlaybackStateChangedCallback?
   private var hasEmitted = false
-  private var lastSnapshotKey: String?
+  private var lastSnapshotKey: MediaInfoSnapshotKey?
 
   init(
     enrichmentProvider: MediaInfoProvider,
@@ -61,14 +61,18 @@ final class AdaptiveMediaInfoProvider: MediaInfoProvider {
     }
   }
 
-  func getMediaInfo() -> MediaInfo? {
-    if let authoritativeInfo = authoritativeProvider.getMediaInfo() {
-      guard let enrichmentInfo = enrichmentProvider.getMediaInfo() else {
-        return authoritativeInfo
+  func fetchMediaInfo() -> MediaInfoFetchResult {
+    switch authoritativeProvider.fetchMediaInfo() {
+    case .resolved(nil):
+      return .resolved(nil)
+    case .resolved(let authoritativeInfo?):
+      guard case .resolved(let enrichmentInfo?) = enrichmentProvider.fetchMediaInfo() else {
+        return .resolved(authoritativeInfo)
       }
-      return Self.merge(authoritative: authoritativeInfo, enrichment: enrichmentInfo)
+      return .resolved(Self.merge(authoritative: authoritativeInfo, enrichment: enrichmentInfo))
+    case .unavailable:
+      return enrichmentProvider.fetchMediaInfo()
     }
-    return enrichmentProvider.getMediaInfo()
   }
 
   func cancelCurrentRequest() {
@@ -87,7 +91,7 @@ final class AdaptiveMediaInfoProvider: MediaInfoProvider {
       }
 
       guard let resolved = resolveState() else { return }
-      let snapshotKey = Self.snapshotKey(for: resolved)
+      let snapshotKey = MediaInfoSnapshotKey(resolved)
       guard !hasEmitted || lastSnapshotKey != snapshotKey else { return }
 
       hasEmitted = true
@@ -145,14 +149,4 @@ final class AdaptiveMediaInfoProvider: MediaInfoProvider {
     return matchingApplication && lhs.name == rhs.name && lhs.artist == rhs.artist
   }
 
-  private static func snapshotKey(for info: MediaInfo?) -> String {
-    guard let info else { return "<no-media>" }
-    return [
-      info.name ?? "",
-      info.artist ?? "",
-      info.album ?? "",
-      info.playing.description,
-      info.applicationIdentifier ?? "",
-    ].joined(separator: "|")
-  }
 }

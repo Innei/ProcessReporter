@@ -199,6 +199,12 @@ class ReporterStatusItemManager: NSObject {
 	func updateCurrentMediaItem(
 		_ mediaInfo: MediaInfo? = nil
 	) {
+		// Reset rich presentation first. NSMenuItem keeps attributedTitle and
+		// image independently from title, so assigning title alone leaves stale
+		// artwork and text visible.
+		currentMediaNameItem.attributedTitle = nil
+		currentMediaNameItem.image = nil
+
 		if let mediaInfo = mediaInfo, let name = mediaInfo.name {
 			let statusPrefix = mediaInfo.playing ? "" : "⏸ "
 			currentMediaNameItem.title = statusPrefix + formatMediaName(name, mediaInfo.artist)

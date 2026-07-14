@@ -98,20 +98,26 @@ public class MediaInfoManager: NSObject {
     if Thread.isMainThread {
       return latestInfo
     }
-    let info = provider.getMediaInfo()
-    latestInfo = info
-    return info
+    return resolve(provider.fetchMediaInfo())
   }
 
   // Async API backed by the serializing actor with timeout and coalescing
   public static func getMediaInfoAsync(timeout seconds: TimeInterval = 3.0) async throws
     -> MediaInfo?
   {
-    let info = try await MediaInfoFetchActor.shared.requestInfo(using: provider, timeout: seconds)
-    latestInfo = info
-    return info
+    let result = try await MediaInfoFetchActor.shared.requestInfo(using: provider, timeout: seconds)
+    return resolve(result)
   }
 
+  private static func resolve(_ result: MediaInfoFetchResult) -> MediaInfo? {
+    switch result {
+    case .resolved(let info):
+      latestInfo = info
+      return info
+    case .unavailable:
+      return latestInfo
+    }
+  }
 }
 
 // MARK: - Concurrency-based Media Info Actor
@@ -121,9 +127,9 @@ public class MediaInfoManager: NSObject {
 actor MediaInfoFetchActor {
   static let shared = MediaInfoFetchActor()
 
-  private var inFlightTask: Task<MediaInfo?, Error>?
+  private var inFlightTask: Task<MediaInfoFetchResult, Error>?
   private var lastRequestStart: Date?
-  private var lastCompletedResult: MediaInfo?
+  private var lastCompletedResult: MediaInfoFetchResult?
   private let coalesceInterval: TimeInterval = 0.2
 
   enum ErrorType: Swift.Error { case timeout }
@@ -134,7 +140,7 @@ actor MediaInfoFetchActor {
   /// - Returning the same in-flight Task when already running
   /// - Timeout with external process interruption (for CLI provider)
   func requestInfo(using provider: MediaInfoProvider, timeout seconds: TimeInterval = 3.0)
-    async throws -> MediaInfo?
+    async throws -> MediaInfoFetchResult
   {
     if let task = inFlightTask {
       return try await task.value
@@ -155,12 +161,12 @@ actor MediaInfoFetchActor {
 
     lastRequestStart = Date()
 
-    let task = Task<MediaInfo?, Error> {
-      // Run provider.getMediaInfo() concurrently with a timeout task
-      try await withThrowingTaskGroup(of: MediaInfo?.self) { group in
+    let task = Task<MediaInfoFetchResult, Error> {
+      // Run provider.fetchMediaInfo() concurrently with a timeout task
+      try await withThrowingTaskGroup(of: MediaInfoFetchResult.self) { group in
         group.addTask {
           // Run on a background thread, not on the actor
-          return provider.getMediaInfo()
+          return provider.fetchMediaInfo()
         }
         group.addTask {
           try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))

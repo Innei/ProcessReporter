@@ -80,7 +80,7 @@ final class JXAMediaInfoProvider: MediaInfoProvider {
   private var currentProcess: Process?
   private var isMonitoring = false
   private var hasEmitted = false
-  private var lastSnapshotKey: String?
+  private var lastSnapshotKey: MediaInfoSnapshotKey?
 
   init(pollInterval: TimeInterval = 1.0, requestTimeout: TimeInterval = 2.0) {
     self.pollInterval = pollInterval
@@ -121,12 +121,12 @@ final class JXAMediaInfoProvider: MediaInfoProvider {
     cancelCurrentRequest()
   }
 
-  func getMediaInfo() -> MediaInfo? {
-    switch fetchMediaInfo() {
+  func fetchMediaInfo() -> MediaInfoFetchResult {
+    switch performFetch() {
     case .success(let info):
-      return info
+      return .resolved(info)
     case .failure:
-      return nil
+      return .unavailable
     }
   }
 
@@ -147,11 +147,11 @@ final class JXAMediaInfoProvider: MediaInfoProvider {
 
     // A failed invocation is not equivalent to an authoritative "no media"
     // result. In that case the adaptive provider keeps using media-control.
-    guard case .success(let info) = fetchMediaInfo() else { return }
+    guard case .success(let info) = performFetch() else { return }
     emitIfChanged(info)
   }
 
-  private func fetchMediaInfo() -> Result<MediaInfo?, FetchError> {
+  private func performFetch() -> Result<MediaInfo?, FetchError> {
     executionLock.lock()
     defer { executionLock.unlock() }
 
@@ -246,7 +246,7 @@ final class JXAMediaInfoProvider: MediaInfoProvider {
   }
 
   private func emitIfChanged(_ info: MediaInfo?) {
-    let snapshotKey = Self.snapshotKey(for: info)
+    let snapshotKey = MediaInfoSnapshotKey(info)
 
     stateLock.lock()
     guard isMonitoring else {
@@ -263,16 +263,5 @@ final class JXAMediaInfoProvider: MediaInfoProvider {
     stateLock.unlock()
 
     callback?(info)
-  }
-
-  private static func snapshotKey(for info: MediaInfo?) -> String {
-    guard let info else { return "<no-media>" }
-    return [
-      info.name ?? "",
-      info.artist ?? "",
-      info.album ?? "",
-      info.playing.description,
-      info.applicationIdentifier ?? "",
-    ].joined(separator: "|")
   }
 }
