@@ -9,7 +9,8 @@ import Foundation
 import RxCocoa
 import RxSwift
 
-class PreferencesDataModel {
+@MainActor
+final class PreferencesDataModel {
 	public static let shared = PreferencesDataModel.self
 
     static func collectPreferences() -> [String: Any] {
@@ -20,9 +21,9 @@ class PreferencesDataModel {
             "enabledTypes": PreferencesDataModel.enabledTypes.value.toStorable() ?? [
                 Reporter.Types.media.rawValue, Reporter.Types.process.rawValue,
             ],
-            "mixSpaceIntegration": PreferencesDataModel.mixSpaceIntegration.value.toDictionary(),
-            "slackIntegration": PreferencesDataModel.slackIntegration.value.toDictionary(),
-            "s3Integration": PreferencesDataModel.s3Integration.value.toDictionary(),
+            "mixSpaceIntegration": PreferencesDataModel.mixSpaceIntegration.value.exportDictionary(),
+            "slackIntegration": PreferencesDataModel.slackIntegration.value.exportDictionary(),
+            "s3Integration": PreferencesDataModel.s3Integration.value.exportDictionary(),
             "discordIntegration": PreferencesDataModel.discordIntegration.value.toDictionary(),
             "ignoreNullArtist": PreferencesDataModel.ignoreNullArtist.value,
             "filteredProcesses": PreferencesDataModel.filteredProcesses.value,
@@ -51,9 +52,73 @@ class PreferencesDataModel {
 				return false
 			}
 
-			if let isEnabled = dictionary["isEnabled"] as? Bool {
-				PreferencesDataModel.isEnabled.accept(isEnabled)
+			let currentMixSpace = PreferencesDataModel.mixSpaceIntegration.value
+			let currentSlack = PreferencesDataModel.slackIntegration.value
+			let currentS3 = PreferencesDataModel.s3Integration.value
+			var importedMixSpace: MixSpaceIntegration?
+			var importedSlack: SlackIntegration?
+			var importedS3: S3Integration?
+			var credentialChanges: [CredentialStore.Change] = []
+
+			if let mixSpaceDict = dictionary["mixSpaceIntegration"] as? [String: Any] {
+				var integration = MixSpaceIntegration.fromDictionary(mixSpaceDict)
+				if (mixSpaceDict["apiToken"] as? String)?.isEmpty != false {
+					integration.apiToken = currentMixSpace.apiToken
+				}
+				credentialChanges.append(.init(
+					account: IntegrationCredentialAccount.mixSpaceToken,
+					previousValue: currentMixSpace.apiToken,
+					newValue: integration.apiToken
+				))
+				importedMixSpace = integration
 			}
+
+			if let slackDict = dictionary["slackIntegration"] as? [String: Any] {
+				var integration = SlackIntegration.fromDictionary(slackDict)
+				if (slackDict["apiToken"] as? String)?.isEmpty != false {
+					integration.apiToken = currentSlack.apiToken
+				}
+				credentialChanges.append(.init(
+					account: IntegrationCredentialAccount.slackToken,
+					previousValue: currentSlack.apiToken,
+					newValue: integration.apiToken
+				))
+				importedSlack = integration
+			}
+
+			if let s3Dict = dictionary["s3Integration"] as? [String: Any] {
+				var integration = S3Integration.fromDictionary(s3Dict)
+				if (s3Dict["accessKey"] as? String)?.isEmpty != false {
+					integration.accessKey = currentS3.accessKey
+				}
+				if (s3Dict["secretKey"] as? String)?.isEmpty != false {
+					integration.secretKey = currentS3.secretKey
+				}
+				credentialChanges.append(contentsOf: [
+					.init(
+						account: IntegrationCredentialAccount.s3AccessKey,
+						previousValue: currentS3.accessKey,
+						newValue: integration.accessKey
+					),
+					.init(
+						account: IntegrationCredentialAccount.s3SecretKey,
+						previousValue: currentS3.secretKey,
+						newValue: integration.secretKey
+					),
+				])
+				importedS3 = integration
+			}
+
+			// A legacy backup may contain credentials. Commit all of those Keychain
+			// changes as one rollback-capable group before exposing any imported
+			// preference to the running reporter.
+			guard CredentialStore.apply(credentialChanges) else { return false }
+
+			// Do not let the reporter observe a half-imported configuration. Pause it,
+			// apply the complete payload, then restore the requested enabled state.
+			let desiredIsEnabled = dictionary["isEnabled"] as? Bool
+				?? PreferencesDataModel.isEnabled.value
+			PreferencesDataModel.isEnabled.accept(false)
 			if let focusReport = dictionary["focusReport"] as? Bool {
 				PreferencesDataModel.focusReport.accept(focusReport)
 			}
@@ -62,17 +127,14 @@ class PreferencesDataModel {
 			{
 				PreferencesDataModel.sendInterval.accept(sendInterval)
 			}
-			if let mixSpaceDict = dictionary["mixSpaceIntegration"] as? [String: Any] {
-				PreferencesDataModel.mixSpaceIntegration.accept(
-					MixSpaceIntegration.fromDictionary(mixSpaceDict))
+			if let importedMixSpace {
+				PreferencesDataModel.mixSpaceIntegration.accept(importedMixSpace)
 			}
-			if let slackDict = dictionary["slackIntegration"] as? [String: Any] {
-				PreferencesDataModel.slackIntegration.accept(
-					SlackIntegration.fromDictionary(slackDict))
+			if let importedSlack {
+				PreferencesDataModel.slackIntegration.accept(importedSlack)
 			}
-            if let s3Dict = dictionary["s3Integration"] as? [String: Any] {
-                PreferencesDataModel.s3Integration.accept(
-                    S3Integration.fromDictionary(s3Dict))
+			if let importedS3 {
+				PreferencesDataModel.s3Integration.accept(importedS3)
             }
             if let discordDict = dictionary["discordIntegration"] as? [String: Any] {
                 PreferencesDataModel.discordIntegration.accept(
@@ -97,9 +159,13 @@ class PreferencesDataModel {
 				PreferencesDataModel.hasShownMediaControlInstallPrompt.accept(hasShownMediaControlInstallPrompt)
 			}
 
-			if let mapping = dictionary["mappingList"] as? [String: Any] {
+			// Mapping lists are exported as an array of dictionaries. Ignore malformed
+			// mapping entries while still importing the other valid preferences.
+			if let mapping = dictionary["mappingList"] as? [[String: Any]] {
 				PreferencesDataModel.mappingList.accept(MappingList.fromDictionary(mapping))
 			}
+
+			PreferencesDataModel.isEnabled.accept(desiredIsEnabled)
 
 			return true
 		} catch {

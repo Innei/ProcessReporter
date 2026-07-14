@@ -1,15 +1,12 @@
 import AppKit
-import RxSwift
 import SnapKit
 import UniformTypeIdentifiers
 
 extension PreferencesIntegrationSlackView {
+	@MainActor
 	class EmojiConditionViewController: NSViewController {
 		// MARK: - Properties
 
-		private let disposeBag = DisposeBag()
-		private var isEditing = false
-		private var editingIndex: Int?
 		private var conditions: [EmojiConditionList.EmojiCondition] = []
 		private var itemViews: [ConditionFormItemView] = []
 		private var draggedView: ConditionFormItemView?
@@ -84,8 +81,14 @@ extension PreferencesIntegrationSlackView {
 		}
 
 		override func viewDidAppear() {
+			super.viewDidAppear()
 			// Load existing conditions
 			loadExistingConditions()
+		}
+
+		override func viewWillDisappear() {
+			super.viewWillDisappear()
+			cleanUpDragState()
 		}
 
 		private func loadExistingConditions() {
@@ -101,27 +104,15 @@ extension PreferencesIntegrationSlackView {
 
 			// Reset stored item views
 			itemViews.removeAll()
+			dropIndicatorView = nil
+			draggedCloneView = nil
 
 			var previousItem: ConditionFormItemView?
 			for (index, condition) in conditions.enumerated() {
 				let itemView = ConditionFormItemView(initialValue: condition)
-				itemView.index = index
+				configure(itemView, at: index)
 				contentView.addSubview(itemView)
 				itemViews.append(itemView)
-
-				// Set delete handler
-				itemView.onDelete = { [weak self] in
-					self?.removeCondition(at: index)
-				}
-
-				// Set drag handlers
-				itemView.onDragStart = { [weak self] view in
-					self?.handleDragStart(view)
-				}
-
-				itemView.onDragEnded = { [weak self] view in
-					self?.handleDragEnd(view)
-				}
 
 				itemView.snp.makeConstraints { make in
 					make.horizontalEdges.equalToSuperview()
@@ -137,6 +128,23 @@ extension PreferencesIntegrationSlackView {
 			}
 
 			layout()
+		}
+
+		private func configure(_ itemView: ConditionFormItemView, at index: Int) {
+			itemView.index = index
+			itemView.onDelete = { [weak self] in
+				self?.removeCondition(at: index)
+			}
+			itemView.onDragStart = { [weak self] view in
+				self?.handleDragStart(view)
+			}
+			itemView.onDragEnded = { [weak self] view in
+				self?.handleDragEnd(view)
+			}
+		}
+
+		private func snapshotCurrentConditions() {
+			conditions = itemViews.map { $0.saveCondition() }
 		}
 
 		private func handleDragStart(_ view: ConditionFormItemView) {
@@ -217,6 +225,7 @@ extension PreferencesIntegrationSlackView {
 						moveItem(from: draggedIndex, to: targetIndex)
 					} else {
 						// If not dropped on a valid position, reset the layout
+						snapshotCurrentConditions()
 						updateItems()
 					}
 
@@ -227,6 +236,7 @@ extension PreferencesIntegrationSlackView {
 		}
 
 		private func moveItem(from fromIndex: Int, to toIndex: Int) {
+			snapshotCurrentConditions()
 			guard fromIndex != toIndex,
 			      conditions.indices.contains(fromIndex),
 			      conditions.indices.contains(toIndex) else { return }
@@ -248,7 +258,8 @@ extension PreferencesIntegrationSlackView {
 			let targetView = itemViews[index]
 
 			// Show indicator above or below based on dragged index
-			let isDraggingDown = draggedIndex! < index
+			guard let draggedIndex else { return }
+			let isDraggingDown = draggedIndex < index
 
 			// Position indicator
 			indicator.isHidden = false
@@ -261,8 +272,12 @@ extension PreferencesIntegrationSlackView {
 		}
 
 		private func handleDragEnd(_ view: ConditionFormItemView) {
-			// Restore original appearance
 			view.alphaValue = 1.0
+			cleanUpDragState()
+		}
+
+		private func cleanUpDragState() {
+			draggedView?.alphaValue = 1.0
 
 			// Remove the clone view
 			draggedCloneView?.removeFromSuperview()
@@ -283,6 +298,7 @@ extension PreferencesIntegrationSlackView {
 		}
 
 		private func removeCondition(at index: Int) {
+			snapshotCurrentConditions()
 			guard conditions.indices.contains(index) else { return }
 			conditions.remove(at: index)
 			updateItems()
@@ -290,9 +306,12 @@ extension PreferencesIntegrationSlackView {
 
 		func layout() {
             contentView.snp.remakeConstraints { make in
-				guard let lastView = itemViews.last else { return }
                 make.top.horizontalEdges.equalToSuperview()
-				make.bottom.equalTo(lastView.snp.bottom).offset(16)
+				if let lastView = itemViews.last {
+					make.bottom.equalTo(lastView.snp.bottom).offset(16)
+				} else {
+					make.bottom.equalToSuperview()
+				}
 			}
 		}
 
@@ -349,15 +368,23 @@ extension PreferencesIntegrationSlackView.EmojiConditionViewController {
 	}
 
 	@objc func save() {
-		// 获取所有 ConditionFormItemView 实例
-		let itemViews = contentView.subviews.compactMap { $0 as? ConditionFormItemView }
+		if let invalidIndex = itemViews.firstIndex(where: { $0.validationError != nil }),
+		   let validationError = itemViews[invalidIndex].validationError
+		{
+			ToastManager.shared.error("Condition \(invalidIndex + 1): \(validationError)")
+			return
+		}
 
-		// 创建新的条件列表
-		let newConditions = itemViews.map { $0.saveCondition() }
+		snapshotCurrentConditions()
 
 		// 更新到 Preferences 中
-		var integration = PreferencesDataModel.shared.slackIntegration.value
-		integration.customEmojiConditionList = EmojiConditionList(conditions: newConditions)
+		let previousIntegration = PreferencesDataModel.shared.slackIntegration.value
+		var integration = previousIntegration
+		integration.customEmojiConditionList = EmojiConditionList(conditions: conditions)
+		guard integration.persistCredentialChanges(comparedTo: previousIntegration) else {
+			ToastManager.shared.error("Could not verify the Slack API token in Keychain")
+			return
+		}
 		PreferencesDataModel.shared.slackIntegration.accept(integration)
 
 		// 关闭窗口
@@ -365,30 +392,9 @@ extension PreferencesIntegrationSlackView.EmojiConditionViewController {
 	}
 
 	@objc func addCondition() {
-		let itemView = ConditionFormItemView()
-
-		NSAnimationContext.runAnimationGroup { context in
-			context.duration = 0.3
-			context.allowsImplicitAnimation = true
-			let lastView = contentView.subviews.last
-			contentView.addSubview(itemView)
-
-			itemView.snp.makeConstraints { make in
-				make.horizontalEdges.equalToSuperview()
-				if let lastView = lastView as? ConditionFormItemView {
-					make.top.equalTo(lastView.snp.bottom).offset(16)
-				} else {
-					make.top.equalToSuperview()
-				}
-			}
-
-			contentView.layoutSubtreeIfNeeded()
-			itemView.sizeToFit()
-
-			itemViews.append(itemView)
-
-			layout()
-		}
+		snapshotCurrentConditions()
+		conditions.append(.init(when: "", emoji: ""))
+		updateItems()
 	}
 }
 
@@ -480,6 +486,7 @@ private class ConditionFormItemView: NSView {
 		let button = NSButton(title: "😀", target: nil, action: #selector(NSApp.orderFrontCharacterPalette))
 		let emojiImage = NSImage(systemSymbolName: "face.smiling", accessibilityDescription: "open emoji panel")
 		button.image = emojiImage
+		button.target = NSApp
 		button.bezelStyle = .inline
 		button.isBordered = false
 		return button
@@ -499,6 +506,16 @@ private class ConditionFormItemView: NSView {
 	var onDelete: (() -> Void)?
 	var onDragStart: ((ConditionFormItemView) -> Void)?
 	var onDragEnded: ((ConditionFormItemView) -> Void)?
+
+	var validationError: String? {
+		if valueTextField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+			return "the comparison value is required"
+		}
+		if emojiTextField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+			return "the emoji is required"
+		}
+		return nil
+	}
 
 	@objc private func deleteCondition() {
 		onDelete?()
@@ -578,10 +595,12 @@ private class ConditionFormItemView: NSView {
 		let condition = EmojiConditionList.EmojiCondition.Condition.allCases[conditionIndex]
 
 		// 构建 when 字符串: "{variable} condition "value""
-		let whenString = "{\(variable.rawValue)} \(condition.rawValue) \"\(valueTextField.stringValue)\""
+		let value = valueTextField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+		let emoji = emojiTextField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+		let whenString = "{\(variable.rawValue)} \(condition.rawValue) \"\(value)\""
 
 		// 返回新的条件对象
-		return EmojiConditionList.EmojiCondition(when: whenString, emoji: emojiTextField.stringValue)
+		return EmojiConditionList.EmojiCondition(when: whenString, emoji: emoji)
 	}
 
 	func sizeToFit() {
@@ -683,6 +702,7 @@ private class ConditionFormItemView: NSView {
 	}
 
 	private func setupDragAndDrop() {
+		dragHandle.toolTip = "Drag to reorder this condition"
 		let dragGesture = NSPanGestureRecognizer(target: self, action: #selector(handleDragGesture(_:)))
 		dragHandle.addGestureRecognizer(dragGesture)
 	}

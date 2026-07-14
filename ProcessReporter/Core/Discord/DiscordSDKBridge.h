@@ -18,14 +18,17 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)discordSDKDidConnect:(DiscordSDKBridge *)bridge;
 - (void)discordSDKDidDisconnect:(DiscordSDKBridge *)bridge
                           error:(NSError *_Nullable)error;
+- (void)discordSDK:(DiscordSDKBridge *)bridge
+    didCompleteActivityUpdateWithError:(NSError *_Nullable)error;
 @end
 
 @interface DiscordSDKBridge : NSObject
 
-@property(nonatomic, assign) id<DiscordSDKBridgeDelegate> delegate;
+@property(nonatomic, weak, nullable) id<DiscordSDKBridgeDelegate> delegate;
 @property(nonatomic, readonly) BOOL isConnected;
 
 + (instancetype)sharedInstance;
++ (BOOL)isSDKAvailable;
 
 - (void)initializeWithApplicationId:(NSString *)applicationId;
 - (void)setActivityWithDetails:(NSString *_Nullable)details
@@ -59,6 +62,7 @@ NS_ASSUME_NONNULL_BEGIN
                 smallImageText:(NSString *_Nullable)smallImageText
                         buttons:(NSArray<NSDictionary<NSString *, NSString *> *> *_Nullable)buttons;
 - (void)clearActivity;
+- (void)cancelPendingActivityUpdate;
 - (void)shutdown;
 
 @end

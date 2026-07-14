@@ -1,7 +1,11 @@
 import AppKit
 
-var reporter: Reporter?
+@MainActor
+enum ApplicationState {
+    static var reporter: Reporter?
+}
 
+@MainActor
 func main() {
     let app = NSApplication.shared
     let delegate = AppDelegate()
@@ -10,7 +14,7 @@ func main() {
     Task { @MainActor in
         do {
             try await DataStore.shared.initialize()
-            reporter = Reporter()
+            ApplicationState.reporter = Reporter()
         } catch {
             NSLog("Failed to initialize database: \(error)")
             // Show alert to user
@@ -24,11 +28,12 @@ func main() {
         }
     }
 
-    setupMenu()
+    setupMenu(appDelegate: delegate)
     _ = NSApplicationMain(CommandLine.argc, CommandLine.unsafeArgv)
 }
 
-private func setupMenu() {
+@MainActor
+private func setupMenu(appDelegate: AppDelegate) {
     let mainMenu = NSMenu()
 
     // MARK: - File Menu
@@ -41,6 +46,13 @@ private func setupMenu() {
         title: "Close Window",
         action: #selector(NSWindow.performClose(_:)),
         keyEquivalent: "w"
+    ))
+
+    fileMenu.addItem(NSMenuItem(
+        title: "Check for Updates…",
+        action: #selector(AppDelegate.checkForUpdates(_:)),
+        keyEquivalent: "",
+        target: appDelegate
     ))
 
     fileMenu.addItem(NSMenuItem(
@@ -72,4 +84,6 @@ private func setupMenu() {
     NSApp.mainMenu = mainMenu
 }
 
-main()
+MainActor.assumeIsolated {
+    main()
+}

@@ -12,7 +12,8 @@ import SnapKit
 
 private let statusExpirationOptions = [30, 60, 120, 300]
 
-class PreferencesIntegrationSlackView: IntegrationView {
+@MainActor
+final class PreferencesIntegrationSlackView: IntegrationView {
     private lazy var enabledButton: NSButton = {
         let button = NSButton(
             checkboxWithTitle: "", target: nil, action: nil
@@ -36,6 +37,7 @@ class PreferencesIntegrationSlackView: IntegrationView {
             systemSymbolName: "face.smiling", accessibilityDescription: "open emoji panel"
         )
         button.image = emojiImage
+        button.target = NSApp
         // Use .inline or .texturedRounded for a more compact look if desired
         button.bezelStyle = .inline
         button.isBordered = false  // Optional: remove border for tighter integration
@@ -143,7 +145,7 @@ class PreferencesIntegrationSlackView: IntegrationView {
                 1. Go to Oauth - Scopes - User Token Scopes.
                 2. Add `users.profile:write`
                 3. Install App to Workspace
-                4. Copy the Bot User OAuth Token, start with `xoxp-`
+                4. Copy the User OAuth Token, which starts with `xoxp-`
                 """
         )
 
@@ -163,11 +165,11 @@ class PreferencesIntegrationSlackView: IntegrationView {
 
                 stackView.addArrangedSubview(globalCustomEmojiInput)
                 stackView.addArrangedSubview(emojiPickerButton)
-				emojiPickerButton.snp.remakeConstraints { make in
-                    make.right.equalTo(globalCustomEmojiInput.snp.right).inset(4)
-                    make.verticalEdges.equalTo(globalCustomEmojiInput)
-                    make.height.equalTo(globalCustomEmojiInput)
-                    make.width.equalTo(16)
+                globalCustomEmojiInput.snp.makeConstraints { make in
+                    make.width.greaterThanOrEqualTo(160)
+                }
+                emojiPickerButton.snp.makeConstraints { make in
+                    make.width.equalTo(24)
                 }
 
                 stackView.addArrangedSubview(conditionEmojiButton)
@@ -249,15 +251,28 @@ class PreferencesIntegrationSlackView: IntegrationView {
     }
 
     @objc private func save() {
-        var integration = PreferencesDataModel.shared.slackIntegration.value
+        let previousIntegration = PreferencesDataModel.shared.slackIntegration.value
+        var integration = previousIntegration
         integration.isEnabled = enabledButton.state == .on
         integration.globalCustomEmoji = globalCustomEmojiInput.stringValue
         integration.statusTextTemplateString = statusTextTemplateStringInput.stringValue
-        integration.expiration =
-            statusExpirationOptions[statusExpirationDropdown.indexOfSelectedItem]
+        guard statusExpirationOptions.indices.contains(statusExpirationDropdown.indexOfSelectedItem)
+        else {
+            ToastManager.shared.error("Select a valid status expiration")
+            return
+        }
+        integration.expiration = statusExpirationOptions[statusExpirationDropdown.indexOfSelectedItem]
         integration.defaultEmoji = defaultEmojiInput.stringValue
         integration.defaultStatusText = defaultStatusTextInput.stringValue
-        integration.apiToken = apiKeyInput.stringValue
+        integration.apiToken = apiKeyInput.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if integration.isEnabled && integration.apiToken.isEmpty {
+            ToastManager.shared.error("Slack API token is required when the integration is enabled")
+            return
+        }
+        guard integration.persistCredentialChanges(comparedTo: previousIntegration) else {
+            ToastManager.shared.error("Could not update the Slack API token in Keychain")
+            return
+        }
         PreferencesDataModel.shared.slackIntegration.accept(integration)
         ToastManager.shared.success("Saved!")
     }
@@ -265,63 +280,5 @@ class PreferencesIntegrationSlackView: IntegrationView {
     @objc private func openConditionEmojiModal() {
         NSApplication.shared.keyWindow?.contentViewController?.presentAsSheet(
             EmojiConditionViewController())
-    }
-}
-
-class EmojiConditionViewController: NSViewController {
-    private lazy var scrollView: NSScrollView = {
-        let scrollView = NSScrollView()
-        return scrollView
-    }()
-
-    private lazy var buttonStack: NSStackView = {
-        let stackView = NSStackView()
-        stackView.spacing = 8
-
-        stackView.orientation = .horizontal
-        stackView.distribution = .fill
-        return stackView
-    }()
-
-    private lazy var saveButton: NSButton = {
-        let button = NSButton(title: "Save", target: self, action: #selector(save))
-        button.bezelStyle = .push
-        button.keyEquivalent = "\r"
-        return button
-    }()
-
-    @objc func save() {}
-    @objc func cancel() {
-        dismiss(nil)
-    }
-
-    override func loadView() {
-        view = NSView(frame: NSRect(origin: .zero, size: .init(width: 500, height: 400)))
-
-        view.addSubview(scrollView)
-        view.addSubview(buttonStack)
-        let spacer = NSView()
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        spacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        buttonStack.addArrangedSubview(spacer)
-        buttonStack.addArrangedSubview(
-            {
-                let button = NSButton(title: "Cancel", target: self, action: #selector(cancel))
-                button.bezelStyle = .rounded
-                button.keyEquivalent = "\u{1b}"
-                return button
-            }())
-        buttonStack.addArrangedSubview(saveButton)
-
-        buttonStack.snp.makeConstraints { make in
-            make.bottom.equalToSuperview().inset(16)
-            make.horizontalEdges.equalToSuperview().inset(16)
-        }
-
-        scrollView.documentView = NSView()
-        scrollView.snp.makeConstraints { make in
-            make.top.horizontalEdges.equalToSuperview()
-            make.bottom.equalTo(buttonStack.snp.top).offset(-16)
-        }
     }
 }

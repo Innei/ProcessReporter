@@ -6,5 +6,11 @@
 	<string>我们的应用使用辅助功能服务来读取当前活动窗口的标题，以提供更丰富的功能。</string>
 	<key>NSApplicationRequiresAccessToUserApplicationFolder</key>
 	<true/>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>$(SPARKLE_FEED_URL)</string>
+	<key>SUPublicEDKey</key>
+	<string>$(SPARKLE_PUBLIC_ED_KEY)</string>
 </dict>
 </plist>

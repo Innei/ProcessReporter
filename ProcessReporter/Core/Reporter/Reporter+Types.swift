@@ -14,23 +14,25 @@ extension Reporter {
     }
 }
 
+@MainActor
 protocol ReporterExtension {
     var name: String { get }
     var isEnabled: Bool { get }
-    func register(to reporter: Reporter) async
-    func unregister(from reporter: Reporter) async
+    func register(to reporter: Reporter)
+    func unregister(from reporter: Reporter)
+    func clearReportedState()
     func createReporterOptions() -> ReporterOptions
 }
 
 // Default implementation
 extension ReporterExtension {
-    func register(to reporter: Reporter) async {
-        await reporter.register(name: name, options: createReporterOptions())
+    func register(to reporter: Reporter) {
+        reporter.register(name: name, options: createReporterOptions())
     }
     
-    func unregister(from reporter: Reporter) async {
-        await reporter.unregister(name: name)
+    func unregister(from reporter: Reporter) {
+        reporter.unregister(name: name)
     }
+
+    func clearReportedState() {}
 }
-
-

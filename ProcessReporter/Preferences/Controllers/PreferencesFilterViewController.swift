@@ -9,20 +9,22 @@ import AppKit
 import SnapKit
 import SwiftUI
 
-class PreferencesFilterViewController: NSViewController, SettingWindowProtocol {
+@MainActor
+final class PreferencesFilterViewController: NSViewController, SettingWindowProtocol {
     let frameSize: NSSize = .init(width: 600, height: 400)
 
     private var preferencesHostingController: PreferencesHostingController?
     override func loadView() {
         super.loadView()
-        preferencesHostingController = PreferencesHostingController()
-        view.addSubview(preferencesHostingController!.view)
-        addChild(preferencesHostingController!)
+        let hostingController = PreferencesHostingController()
+        preferencesHostingController = hostingController
+        view.addSubview(hostingController.view)
+        addChild(hostingController)
         view.snp.makeConstraints { make in
             make.height.equalTo(frameSize.height)
             make.width.equalTo(frameSize.width)
         }
-        preferencesHostingController!.view.snp.makeConstraints { make in
+        hostingController.view.snp.makeConstraints { make in
             make.edges.equalToSuperview()
         }
     }

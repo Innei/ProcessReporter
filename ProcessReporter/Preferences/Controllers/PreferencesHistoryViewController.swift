@@ -9,20 +9,21 @@ import AppKit
 import Foundation
 import SnapKit
 
-class PreferencesHistoryViewController: NSViewController, SettingWindowProtocol {
+@MainActor
+final class PreferencesHistoryViewController: NSViewController, SettingWindowProtocol {
 	final let frameSize: NSSize = .init(width: 1200, height: 600)
 
 	private var tableView: NSTableView!
 	private var scrollView: NSScrollView!
 	private var sortDescriptor: NSSortDescriptor?
 	private var fetchedResults: [ReportValue] = []
-	private var allResults: [ReportValue] = []
 	private var searchField: NSSearchField!
 	private var observer: Any?
+	private var fetchTask: Task<Void, Never>?
+	private var fetchGeneration = 0
 
 	// 分页参数
 	private let pageSize = 50
-	private var currentPage = 0
 	private var hasMoreData = true
 	private var isLoadingData = false
 
@@ -31,19 +32,18 @@ class PreferencesHistoryViewController: NSViewController, SettingWindowProtocol 
 		setupTableView()
 		setupToolbar()
 		setupContextMenu()
-		fetchData()
 	}
 
 	override func viewDidAppear() {
+		super.viewDidAppear()
 		startObservingChanges()
+		fetchData()
 	}
 
 	override func viewWillDisappear() {
+		super.viewWillDisappear()
 		stopObservingChanges()
-	}
-
-	deinit {
-		stopObservingChanges()
+		cancelFetch()
 	}
 
 	private func setupToolbar() {
@@ -122,20 +122,15 @@ class PreferencesHistoryViewController: NSViewController, SettingWindowProtocol 
 		let processColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("process"))
 		processColumn.title = "Process"
 		processColumn.width = 150
-		processColumn.sortDescriptorPrototype = NSSortDescriptor(
-			key: "processName", ascending: true)
 
 		let mediaColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("media"))
 		mediaColumn.title = "Media"
 		mediaColumn.width = 200
-		mediaColumn.sortDescriptorPrototype = NSSortDescriptor(key: "mediaName", ascending: true)
 
 		let mediaProcessColumn = NSTableColumn(
 			identifier: NSUserInterfaceItemIdentifier("mediaProcess"))
 		mediaProcessColumn.title = "Media Process"
 		mediaProcessColumn.width = 150
-		mediaProcessColumn.sortDescriptorPrototype = NSSortDescriptor(
-			key: "mediaProcessName", ascending: true)
 
 		let integrationsColumn = NSTableColumn(
 			identifier: NSUserInterfaceItemIdentifier("integrations"))
@@ -201,74 +196,79 @@ class PreferencesHistoryViewController: NSViewController, SettingWindowProtocol 
 	}
 
 	private func startObservingChanges() {
+		guard observer == nil else { return }
 		// 监听 DataStore 更改
 		observer = NotificationCenter.default.addObserver(
 			forName: DataStore.changedNotification,
 			object: nil,
 			queue: .main
 		) { [weak self] _ in
-			self?.fetchData()
+			Task { @MainActor [weak self] in
+				self?.fetchData()
+			}
 		}
 	}
 
 	private func stopObservingChanges() {
 		if let observer = observer {
 			NotificationCenter.default.removeObserver(observer)
+			self.observer = nil
 		}
 	}
 
-	private func fetchData(isLoadingMore: Bool = false) {
-		Task { @MainActor in
-			if !isLoadingMore {
-				// 重置分页参数
-				currentPage = 0
-				hasMoreData = true
-				fetchedResults = []
-			}
+	private func cancelFetch() {
+		fetchGeneration += 1
+		fetchTask?.cancel()
+		fetchTask = nil
+		isLoadingData = false
+	}
 
-			let ascending = sortDescriptor?.ascending ?? false
-			let offset = currentPage * pageSize
-			let search = (searchField?.stringValue).flatMap { $0.isEmpty ? nil : $0 }
+	private func fetchData(isLoadingMore: Bool = false) {
+		guard !isLoadingMore || (!isLoadingData && hasMoreData) else { return }
+
+		if !isLoadingMore {
+			hasMoreData = true
+		}
+
+		fetchGeneration += 1
+		let generation = fetchGeneration
+		fetchTask?.cancel()
+		isLoadingData = true
+
+		let ascending = sortDescriptor?.ascending ?? false
+		let offset = isLoadingMore ? fetchedResults.count : 0
+		let requestedPageSize = pageSize
+		let searchText = searchField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+		let search = (searchText?.isEmpty == false) ? searchText : nil
+
+		fetchTask = Task { @MainActor [weak self] in
 			let newResults = await DataStore.shared.fetchReports(
 				searchText: search,
 				offset: offset,
-				limit: pageSize,
+				limit: requestedPageSize,
 				ascending: ascending
 			)
 
-			// 检查是否还有更多数据
-			hasMoreData = newResults.count == pageSize
+			guard let self,
+			      !Task.isCancelled,
+			      generation == self.fetchGeneration
+			else { return }
 
+			self.hasMoreData = newResults.count == self.pageSize
 			if isLoadingMore {
-				// 追加新数据
-				fetchedResults.append(contentsOf: newResults)
+				self.fetchedResults.append(contentsOf: newResults)
 			} else {
-				fetchedResults = newResults
+				self.fetchedResults = newResults
 			}
 
-			tableView.reloadData()
-			isLoadingData = false
+			self.tableView.reloadData()
+			self.isLoadingData = false
+			self.fetchTask = nil
 		}
 	}
 
 	private func filterResultsWithSearchText(_ searchText: String) {
-		if searchText.isEmpty {
-			// 清空搜索时，重新从数据库获取数据（带分页）
-			fetchData()
-		} else {
-			// 搜索模式下直接让 DataStore 过滤并返回结果（不分页）
-			Task { @MainActor in
-				let results = await DataStore.shared.fetchReports(
-					searchText: searchText,
-					offset: 0,
-					limit: Int.max / 4,
-					ascending: sortDescriptor?.ascending ?? false
-				)
-				fetchedResults = results
-				hasMoreData = false
-				tableView.reloadData()
-			}
-		}
+		fetchData()
 	}
 
 	@objc private func searchTextChanged(_ sender: NSSearchField) {
@@ -277,9 +277,13 @@ class PreferencesHistoryViewController: NSViewController, SettingWindowProtocol 
 
 	@objc private func openDatabaseLocation() {
 		let fileManager = FileManager.default
-		let appSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-			.first!
-		let bundleID = Bundle.main.bundleIdentifier!
+		guard let appSupportURL = fileManager.urls(
+			for: .applicationSupportDirectory, in: .userDomainMask).first,
+			let bundleID = Bundle.main.bundleIdentifier
+		else {
+			ToastManager.shared.error("Database location is unavailable")
+			return
+		}
 		let directoryURL = appSupportURL.appendingPathComponent(bundleID)
 
 		// 在 Finder 中显示
@@ -302,7 +306,8 @@ class PreferencesHistoryViewController: NSViewController, SettingWindowProtocol 
 					try await DataStore.shared.deleteAllReports()
 					fetchData()
 				} catch {
-					print("Failed to clear history: \(error)")
+					ToastManager.shared.error(
+						"Failed to clear history: \(error.localizedDescription)")
 				}
 			}
 		}
@@ -372,7 +377,7 @@ class PreferencesHistoryViewController: NSViewController, SettingWindowProtocol 
 
 		// 创建包含所有模型数据的字典
 		var jsonDict: [String: Any] = [
-			"id": model.id,
+			"id": model.id.uuidString,
 			"processName": model.processName ?? NSNull(),
 			"timeStamp": model.timeStamp.description,
 			"integrations": model.integrations,
@@ -422,16 +427,13 @@ class PreferencesHistoryViewController: NSViewController, SettingWindowProtocol 
 		let contentRect = scrollView.documentRect
 
 		// 当滚动到底部附近时加载更多数据
-		if visibleRect.maxY >= contentRect.height - 200 {
+		if visibleRect.maxY >= contentRect.maxY - 200 {
 			loadMoreData()
 		}
 	}
 
 	private func loadMoreData() {
 		guard hasMoreData, !isLoadingData else { return }
-		isLoadingData = true
-
-		currentPage += 1
 		fetchData(isLoadingMore: true)
 	}
 }
@@ -447,24 +449,8 @@ extension PreferencesHistoryViewController: NSTableViewDataSource {
 		_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]
 	) {
 		guard let sortDescriptor = tableView.sortDescriptors.first else { return }
-
-		Task { @MainActor in
-			let ascending = sortDescriptor.ascending
-
-			// 重置分页并按新的排序条件获取数据
-			currentPage = 0
-			hasMoreData = true
-
-			let offset = currentPage * pageSize
-			let search = (searchField?.stringValue).flatMap { $0.isEmpty ? nil : $0 }
-			fetchedResults = await DataStore.shared.fetchReports(
-				searchText: search,
-				offset: offset,
-				limit: pageSize,
-				ascending: ascending
-			)
-			tableView.reloadData()
-		}
+		self.sortDescriptor = sortDescriptor
+		fetchData()
 	}
 }
 

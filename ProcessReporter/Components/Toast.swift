@@ -1,7 +1,7 @@
 import Cocoa
 import SnapKit
 
-enum ToastStyle {
+enum ToastStyle: Sendable {
     case success
     case error
     case warning
@@ -38,6 +38,15 @@ enum ToastStyle {
         case .error: return "xmark.circle.fill"
         case .warning: return "exclamationmark.triangle.fill"
         case .info: return "info.circle.fill"
+        }
+    }
+
+    var accessibilityDescription: String {
+        switch self {
+        case .success: return "Success"
+        case .error: return "Error"
+        case .warning: return "Warning"
+        case .info: return "Information"
         }
     }
 
@@ -110,6 +119,8 @@ class ToastWindow: NSPanel {
         hasShadow = false
         backgroundColor = .clear
         level = .floating
+        ignoresMouseEvents = true
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
     }
 }
 
@@ -154,7 +165,10 @@ private class ToastView: NSView {
         addSubview(stackView)
 
         // Icon setup
-        if let image = NSImage(systemSymbolName: style.icon, accessibilityDescription: nil) {
+        if let image = NSImage(
+            systemSymbolName: style.icon,
+            accessibilityDescription: style.accessibilityDescription)
+        {
             iconView.image = image
             iconView.contentTintColor = style.textColor
             stackView.addArrangedSubview(iconView)
@@ -166,6 +180,9 @@ private class ToastView: NSView {
         messageLabel.backgroundColor = .clear
         messageLabel.isBezeled = false
         messageLabel.isEditable = false
+        messageLabel.lineBreakMode = .byTruncatingTail
+        messageLabel.toolTip = message
+        messageLabel.setAccessibilityLabel(message)
         messageLabel.font = .systemFont(ofSize: 13, weight: .medium)
         stackView.addArrangedSubview(messageLabel)
 
@@ -179,25 +196,41 @@ private class ToastView: NSView {
     }
 }
 
-class ToastManager {
+final class ToastManager: @unchecked Sendable {
     static let shared = ToastManager()
+    @MainActor
     private var activeToasts: [ToastWindow] = []
     private let padding: CGFloat = 100
     private let spacing: CGFloat = 10
 
     private init() {}
 
-    @objc private func hideToast(_ window: ToastWindow) {
+    @MainActor
+    private func hideToast(windowNumber: Int) {
+        guard let window = activeToasts.first(where: { $0.windowNumber == windowNumber }) else {
+            return
+        }
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = 0.3
             window.animator().alphaValue = 0
-        }) {
-            window.close()
-            self.activeToasts.removeAll { $0 == window }
-            self.repositionToasts()
+        }) { [weak self] in
+            Task { @MainActor in
+                self?.finishHidingToast(windowNumber: windowNumber)
+            }
         }
     }
 
+    @MainActor
+    private func finishHidingToast(windowNumber: Int) {
+        guard let window = activeToasts.first(where: { $0.windowNumber == windowNumber }) else {
+            return
+        }
+        window.close()
+        activeToasts.removeAll { $0.windowNumber == windowNumber }
+        repositionToasts()
+    }
+
+    @MainActor
     private func repositionToasts() {
         guard let screen = NSScreen.main else { return }
         let screenRect = screen.visibleFrame
@@ -222,37 +255,48 @@ class ToastManager {
         style: ToastStyle = .info,
         duration: TimeInterval = 3.0
     ) {
-        DispatchQueue.main.async {
-            guard let screen = NSScreen.main else { return }
-            let screenRect = screen.visibleFrame
+        let displayDuration = duration.isFinite ? max(0, duration) : 3.0
+        DispatchQueue.main.async { [weak self] in
+            self?.showOnMain(message, style: style, duration: displayDuration)
+        }
+    }
 
-            // Create toast view
-            let toastView = ToastView(message: message, style: style)
-            toastView.frame.size = toastView.fittingSize
+    @MainActor
+    private func showOnMain(
+        _ message: String,
+        style: ToastStyle,
+        duration: TimeInterval
+    ) {
+        guard let screen = NSScreen.main else { return }
+        let screenRect = screen.visibleFrame
 
-            // Create window
-            let windowWidth = min(max(toastView.frame.width, 200), 400)
-            let windowHeight = toastView.frame.height
-            let windowRect = NSRect(
-                x: screenRect.midX - windowWidth / 2,
-                y: screenRect.minY + self.padding,
-                width: windowWidth,
-                height: windowHeight
-            )
+        // Create toast view
+        let toastView = ToastView(message: message, style: style)
+        toastView.frame.size = toastView.fittingSize
 
-            let window = ToastWindow(contentRect: windowRect)
-            window.contentView = toastView
+        // Create window
+        let windowWidth = min(max(toastView.frame.width, 200), 400)
+        let windowHeight = toastView.frame.height
+        let windowRect = NSRect(
+            x: screenRect.midX - windowWidth / 2,
+            y: screenRect.minY + padding,
+            width: windowWidth,
+            height: windowHeight
+        )
 
-            // Show window with animation
-            window.orderFront(nil)
+        let window = ToastWindow(contentRect: windowRect)
+        window.contentView = toastView
 
-            self.activeToasts.append(window)
-            self.repositionToasts()
+        // Show window with animation
+        window.orderFront(nil)
 
-            // Schedule hide
-            DispatchQueue.main.asyncAfter(deadline: .now() + duration) {
-                self.hideToast(window)
-            }
+        activeToasts.append(window)
+        repositionToasts()
+
+        // Schedule hide
+        let windowNumber = window.windowNumber
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
+            self?.hideToast(windowNumber: windowNumber)
         }
     }
 }

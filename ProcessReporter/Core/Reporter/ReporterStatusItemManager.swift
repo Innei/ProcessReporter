@@ -11,6 +11,14 @@ import RxSwift
 import SnapKit
 import SwiftUI
 
+private final class InvalidatingTimer: @unchecked Sendable {
+	var value: Timer?
+
+	deinit {
+		value?.invalidate()
+	}
+}
+
 @MainActor
 class ReporterStatusItemManager: NSObject {
 	private var statusItem: NSStatusItem!
@@ -27,7 +35,8 @@ class ReporterStatusItemManager: NSObject {
 	private var lastSendMediaNameItem: NSMenuItem!
 
 	private var lastReportTime: Date?
-	private var updateTimer: Timer?
+	private let updateTimer = InvalidatingTimer()
+	private var mediaRefreshTask: Task<Void, Never>?
 
 	// Action
 	private var enableMediaReportButton: NSMenuItem!
@@ -51,8 +60,7 @@ class ReporterStatusItemManager: NSObject {
 	}
 
 	deinit {
-		updateTimer?.invalidate()
-		updateTimer = nil
+		mediaRefreshTask?.cancel()
 	}
 
 	private func synchronizeUI() {
@@ -102,6 +110,10 @@ class ReporterStatusItemManager: NSObject {
 		menu.addItem(
 			NSMenuItem(
 				title: "Settings", action: #selector(showSettings), keyEquivalent: ",", target: self))
+		menu.addItem(
+			NSMenuItem(
+				title: "Check for Updates…", action: #selector(checkForUpdates),
+				keyEquivalent: "", target: self))
 
 		menu.addItem(NSMenuItem.separator())
 
@@ -139,12 +151,14 @@ class ReporterStatusItemManager: NSObject {
 	}
 
 	private func setupUpdateTimer() {
-		updateTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+		updateTimer.value = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
 			Task { @MainActor in
 				self?.updateLastSendTimeDisplay()
 			}
 		}
-		RunLoop.main.add(updateTimer!, forMode: .common)
+		if let timer = updateTimer.value {
+			RunLoop.main.add(timer, forMode: .common)
+		}
 	}
 
 	private func updateLastSendTimeDisplay() {
@@ -216,12 +230,16 @@ class ReporterStatusItemManager: NSObject {
 				let attributedString = NSMutableAttributedString(string: fullString)
 
 				// First line: Bold font
-				let firstLineRange = NSRange(location: 0, length: firstLine.count)
+				let firstLineLength = (firstLine as NSString).length
+				let firstLineRange = NSRange(location: 0, length: firstLineLength)
 				attributedString.addAttribute(
 					.font, value: NSFont.systemFont(ofSize: 16, weight: .medium), range: firstLineRange)
 
 				// Second line: Secondary color
-				let secondLineRange = NSRange(location: firstLine.count, length: secondLine.count)
+				let secondLineRange = NSRange(
+					location: firstLineLength,
+					length: (secondLine as NSString).length
+				)
 				attributedString.addAttribute(
 					.foregroundColor, value: NSColor.secondaryLabelColor, range: secondLineRange)
 
@@ -244,10 +262,11 @@ class ReporterStatusItemManager: NSObject {
 	}
 
 	func formatMediaName(_ mediaName: String?, _ artist: String?) -> String {
-		if let mediaName = mediaName, let artist = artist {
+		guard let mediaName else { return "No Media" }
+		if let artist {
 			return "\(mediaName) - \(artist)"
 		}
-		return mediaName == nil ? "No Media" : mediaName!
+		return mediaName
 	}
 }
 
@@ -261,22 +280,33 @@ extension ReporterStatusItemManager: NSMenuDelegate {
 				debugItem.view = DebugUICell()
 			}
 		#endif
-		guard let info = ApplicationMonitor.shared.getFocusedWindowInfo() else { return }
-		updateCurrentProcessItem(info)
-
-		// Fetch media info via async actor with short wait to avoid main-thread blocking
-		var mediaInfo: MediaInfo?
-		let semaphore = DispatchSemaphore(value: 0)
-		Task.detached(priority: .utility) {
-			let result = try? await MediaInfoManager.getMediaInfoAsync(timeout: 3.0)
-			mediaInfo = result ?? mediaInfo
-			semaphore.signal()
-		}
-		_ = semaphore.wait(timeout: .now() + .milliseconds(150))
-		if let mediaInfo = mediaInfo ?? MediaInfoManager.getMediaInfo() {
-			updateCurrentMediaItem(mediaInfo)
+		let preferences = PreferencesDataModel.shared
+		if preferences.isEnabled.value,
+			preferences.enabledTypes.value.types.contains(.process),
+			let info = ApplicationMonitor.shared.getFocusedWindowInfo()
+		{
+			updateCurrentProcessItem(info)
 		} else {
-			updateCurrentMediaItem(nil)
+			currentProcessItem.title = "No Process"
+			currentProcessItem.image = nil
+		}
+
+		// Render the cached value immediately, then refresh without blocking the
+		// main run loop. The previous semaphore path raced on a captured variable
+		// and could freeze menu tracking for every open.
+		updateCurrentMediaItem(MediaInfoManager.getMediaInfo())
+		mediaRefreshTask?.cancel()
+		guard preferences.isEnabled.value,
+			preferences.enabledTypes.value.types.contains(.media)
+		else {
+			mediaRefreshTask = nil
+			return
+		}
+		mediaRefreshTask = Task { @MainActor [weak self] in
+			let refreshedInfo = try? await MediaInfoManager.getMediaInfoAsync(timeout: 3.0)
+			guard let self, !Task.isCancelled else { return }
+			self.updateCurrentMediaItem(refreshedInfo ?? MediaInfoManager.getMediaInfo())
+			self.mediaRefreshTask = nil
 		}
 	}
 }
@@ -293,6 +323,10 @@ extension ReporterStatusItemManager {
 
 	@objc private func showSettings() {
 		SettingWindowManager.shared.showWindow()
+	}
+
+	@objc private func checkForUpdates(_ sender: Any?) {
+		(NSApp.delegate as? AppDelegate)?.checkForUpdates(sender)
 	}
 
 	@objc private func toggleEnableMedia(sender: NSMenuItem) {

@@ -11,6 +11,7 @@
 
 #import "DiscordSDKBridge.h"
 #import <Foundation/Foundation.h>
+#include <cstdint>
 #include <cstring>
 
 #ifndef DISCORD_DYNAMIC_LIB
@@ -20,11 +21,20 @@
 #if __has_include("ffi.h")
 #include "ffi.h"
 #define PR_HAS_DISCORD_C 1
+#elif __has_include("discord_game_sdk.h")
+#include "discord_game_sdk.h"
+#define PR_HAS_DISCORD_C 1
 #else
 #define PR_HAS_DISCORD_C 0
 #endif
 
 #define PR_HAS_DISCORD_CPP 0
+
+static NSError *PRDiscordSDKError(NSInteger code, NSString *description) {
+  return [NSError errorWithDomain:@"DiscordSDKError"
+                             code:code
+                         userInfo:@{NSLocalizedDescriptionKey : description}];
+}
 
 @interface DiscordSDKBridge () {
 #if PR_HAS_DISCORD_CPP
@@ -35,7 +45,36 @@
 }
 @property(nonatomic) BOOL internalConnected;
 @property(nonatomic, strong) NSTimer *runCallbacksTimer;
+@property(nonatomic) NSUInteger pendingActivityUpdateIdentifier;
+@property(nonatomic) NSUInteger nextActivityUpdateIdentifier;
+@property(nonatomic, strong) NSTimer *activityUpdateTimeoutTimer;
+- (NSUInteger)beginActivityUpdate;
+- (void)finishActivityUpdateWithError:(NSError *_Nullable)error
+                           identifier:(NSUInteger)identifier;
+- (void)handleRuntimeDisconnectWithError:(NSError *)error;
 @end
+
+#if PR_HAS_DISCORD_C
+static void PRDiscordActivityUpdateCallback(void *callbackData,
+                                            enum EDiscordResult result) {
+  NSUInteger identifier = (NSUInteger)(uintptr_t)callbackData;
+  NSError *error = nil;
+  if (result != DiscordResult_Ok) {
+    error = PRDiscordSDKError(
+        (NSInteger)result,
+        [NSString stringWithFormat:@"Discord rejected the activity update (%d)",
+                                   (int)result]);
+  }
+  DiscordSDKBridge *bridge = [DiscordSDKBridge sharedInstance];
+  if (result == DiscordResult_ServiceUnavailable ||
+      result == DiscordResult_InternalError ||
+      result == DiscordResult_NotRunning) {
+    [bridge handleRuntimeDisconnectWithError:error];
+  } else {
+    [bridge finishActivityUpdateWithError:error identifier:identifier];
+  }
+}
+#endif
 
 @implementation DiscordSDKBridge
 
@@ -48,11 +87,103 @@
   return instance;
 }
 
++ (BOOL)isSDKAvailable {
+  return PR_HAS_DISCORD_CPP || PR_HAS_DISCORD_C;
+}
+
 - (BOOL)isConnected {
   return self.internalConnected;
 }
 
+- (NSUInteger)beginActivityUpdate {
+  NSUInteger previousIdentifier = self.pendingActivityUpdateIdentifier;
+  if (previousIdentifier != 0) {
+    [self finishActivityUpdateWithError:
+              PRDiscordSDKError(-3, @"Discord activity update was superseded")
+                             identifier:previousIdentifier];
+  }
+
+  self.nextActivityUpdateIdentifier += 1;
+  if (self.nextActivityUpdateIdentifier == 0) {
+    self.nextActivityUpdateIdentifier = 1;
+  }
+  NSUInteger identifier = self.nextActivityUpdateIdentifier;
+  self.pendingActivityUpdateIdentifier = identifier;
+  [self.activityUpdateTimeoutTimer invalidate];
+  self.activityUpdateTimeoutTimer =
+      [NSTimer scheduledTimerWithTimeInterval:5.0
+                                       target:self
+                                     selector:@selector(activityUpdateDidTimeout:)
+                                     userInfo:@(identifier)
+                                      repeats:NO];
+  return identifier;
+}
+
+- (void)activityUpdateDidTimeout:(NSTimer *)timer {
+  NSUInteger identifier = [timer.userInfo unsignedIntegerValue];
+  [self finishActivityUpdateWithError:
+            PRDiscordSDKError(-4, @"Discord activity update timed out")
+                           identifier:identifier];
+}
+
+- (void)finishActivityUpdateWithError:(NSError *)error
+                           identifier:(NSUInteger)identifier {
+  if (![NSThread isMainThread]) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [self finishActivityUpdateWithError:error identifier:identifier];
+    });
+    return;
+  }
+  if (identifier == 0 || self.pendingActivityUpdateIdentifier != identifier)
+    return;
+
+  self.pendingActivityUpdateIdentifier = 0;
+  [self.activityUpdateTimeoutTimer invalidate];
+  self.activityUpdateTimeoutTimer = nil;
+  [self.delegate discordSDK:self didCompleteActivityUpdateWithError:error];
+}
+
+- (void)handleRuntimeDisconnectWithError:(NSError *)error {
+  if (![NSThread isMainThread]) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [self handleRuntimeDisconnectWithError:error];
+    });
+    return;
+  }
+
+  [self.runCallbacksTimer invalidate];
+  self.runCallbacksTimer = nil;
+  self.internalConnected = NO;
+#if PR_HAS_DISCORD_CPP
+  discord::Core *failedCore = _core.release();
+  if (failedCore != nullptr) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      delete failedCore;
+    });
+  }
+#elif PR_HAS_DISCORD_C
+  struct IDiscordCore *failedCore = _cCore;
+  _cCore = nullptr;
+  if (failedCore != nullptr) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      failedCore->destroy(failedCore);
+    });
+  }
+#endif
+  [self notifyDisconnected:error];
+}
+
 - (void)initializeWithApplicationId:(NSString *)applicationId {
+
+  NSUInteger pendingIdentifier = self.pendingActivityUpdateIdentifier;
+  [self finishActivityUpdateWithError:
+            PRDiscordSDKError(-5, @"Discord client was reinitialized")
+                           identifier:pendingIdentifier];
+
+  [self.runCallbacksTimer invalidate];
+  self.runCallbacksTimer = nil;
+  self.internalConnected = NO;
+
   if (applicationId.length == 0) {
     NSError *error =
         [NSError errorWithDomain:@"DiscordSDKError"
@@ -65,6 +196,7 @@
   }
 
 #if PR_HAS_DISCORD_CPP
+  _core.reset();
   discord::Core *rawCore{};
   auto result =
       discord::Core::Create([applicationId longLongValue],
@@ -125,20 +257,36 @@
     [self notifyDisconnected:error];
   }
 #else
-  // No SDK available: simulate a connection so UI flow works
-  self.internalConnected = YES;
-  [self notifyConnected];
+  NSError *error =
+      [NSError errorWithDomain:@"DiscordSDKError"
+                          code:-2
+                      userInfo:@{
+                        NSLocalizedDescriptionKey : @"Discord SDK is unavailable"
+                      }];
+  [self notifyDisconnected:error];
 #endif
 }
 
 - (void)runCallbacks {
 #if PR_HAS_DISCORD_CPP
   if (_core) {
-    _core->RunCallbacks();
+    discord::Core *core = _core.get();
+    discord::Result result = core->RunCallbacks();
+    if (self.internalConnected && result != discord::Result::Ok) {
+      [self handleRuntimeDisconnectWithError:PRDiscordSDKError(
+                                                 (NSInteger)result,
+                                                 @"Discord callback processing failed")];
+    }
   }
 #elif PR_HAS_DISCORD_C
   if (_cCore) {
-    _cCore->run_callbacks(_cCore);
+    struct IDiscordCore *core = _cCore;
+    enum EDiscordResult result = core->run_callbacks(core);
+    if (self.internalConnected && result != DiscordResult_Ok) {
+      [self handleRuntimeDisconnectWithError:PRDiscordSDKError(
+                                                 (NSInteger)result,
+                                                 @"Discord callback processing failed")];
+    }
   }
 #endif
 }
@@ -195,11 +343,20 @@
                  smallImageKey:(NSString *)smallImageKey
                 smallImageText:(NSString *)smallImageText
                         buttons:(NSArray<NSDictionary<NSString *, NSString *> *> *)buttons {
-  if (!self.internalConnected)
+  NSUInteger requestIdentifier = [self beginActivityUpdate];
+  if (!self.internalConnected) {
+    [self finishActivityUpdateWithError:
+              PRDiscordSDKError(-6, @"Discord client is not connected")
+                             identifier:requestIdentifier];
     return;
+  }
 #if PR_HAS_DISCORD_CPP
-  if (!_core)
+  if (!_core) {
+    [self finishActivityUpdateWithError:
+              PRDiscordSDKError(-6, @"Discord client is not connected")
+                             identifier:requestIdentifier];
     return;
+  }
   discord::Activity activity{};
 
   if (details) {
@@ -214,14 +371,14 @@
     std::strncpy(buf, src, 127);
     buf[127] = '\0';
   }
-  if (activityType) {
+  if (activityType != nil) {
     activity.SetType(static_cast<discord::ActivityType>([activityType intValue]));
   }
 
-  if (startTimestamp) {
+  if (startTimestamp != nil) {
     activity.GetTimestamps().SetStart([startTimestamp longLongValue]);
   }
-  if (endTimestamp) {
+  if (endTimestamp != nil) {
     activity.GetTimestamps().SetEnd([endTimestamp longLongValue]);
   }
 
@@ -250,14 +407,24 @@
     buf[127] = '\0';
   }
 
-  _core->ActivityManager().UpdateActivity(activity, [](discord::Result result) {
+  __weak DiscordSDKBridge *weakSelf = self;
+  _core->ActivityManager().UpdateActivity(activity, [weakSelf, requestIdentifier](discord::Result result) {
+    NSError *error = nil;
     if (result != discord::Result::Ok) {
-      NSLog(@"[Discord SDK] Failed to update activity: %d", (int)result);
+      error = PRDiscordSDKError(
+          (NSInteger)result,
+          [NSString stringWithFormat:@"Discord rejected the activity update (%d)",
+                                     (int)result]);
     }
+    [weakSelf finishActivityUpdateWithError:error identifier:requestIdentifier];
   });
 #elif PR_HAS_DISCORD_C
-  if (!_cCore)
+  if (!_cCore) {
+    [self finishActivityUpdateWithError:
+              PRDiscordSDKError(-6, @"Discord client is not connected")
+                             identifier:requestIdentifier];
     return;
+  }
 
   struct DiscordActivity activity;
   memset(&activity, 0, sizeof(activity));
@@ -278,14 +445,14 @@
     }
   }
 
-  if (activityType) {
+  if (activityType != nil) {
     activity.type = (enum EDiscordActivityType)[activityType intValue];
   }
 
-  if (startTimestamp) {
+  if (startTimestamp != nil) {
     activity.timestamps.start = [startTimestamp longLongValue];
   }
-  if (endTimestamp) {
+  if (endTimestamp != nil) {
     activity.timestamps.end = [endTimestamp longLongValue];
   }
 
@@ -355,8 +522,17 @@
   (void)buttons;
 #endif
 
-  _cCore->get_activity_manager(_cCore)->update_activity(
-      _cCore->get_activity_manager(_cCore), &activity, NULL, NULL);
+  IDiscordActivityManager *activityManager =
+      _cCore->get_activity_manager(_cCore);
+  if (!activityManager) {
+    [self finishActivityUpdateWithError:
+              PRDiscordSDKError(-7, @"Discord activity manager is unavailable")
+                             identifier:requestIdentifier];
+    return;
+  }
+  activityManager->update_activity(activityManager, &activity,
+                                   (void *)(uintptr_t)requestIdentifier,
+                                   PRDiscordActivityUpdateCallback);
 #else
   if (buttons && buttons.count > 0) {
     NSLog(@"[Discord SDK Shim] setActivity details=%@ state=%@ type=%@ buttons=%@", details,
@@ -364,10 +540,15 @@
   } else {
     NSLog(@"[Discord SDK Shim] setActivity details=%@ state=%@ type=%@", details, state, activityType);
   }
+  [self finishActivityUpdateWithError:nil identifier:requestIdentifier];
 #endif
 }
 
 - (void)clearActivity {
+  NSUInteger pendingIdentifier = self.pendingActivityUpdateIdentifier;
+  [self finishActivityUpdateWithError:
+            PRDiscordSDKError(-8, @"Discord activity was cleared")
+                           identifier:pendingIdentifier];
   if (!self.internalConnected)
     return;
 #if PR_HAS_DISCORD_CPP
@@ -390,7 +571,18 @@
 #endif
 }
 
+- (void)cancelPendingActivityUpdate {
+  NSUInteger pendingIdentifier = self.pendingActivityUpdateIdentifier;
+  [self finishActivityUpdateWithError:
+            PRDiscordSDKError(-10, @"Discord activity update was cancelled")
+                           identifier:pendingIdentifier];
+}
+
 - (void)shutdown {
+  NSUInteger pendingIdentifier = self.pendingActivityUpdateIdentifier;
+  [self finishActivityUpdateWithError:
+            PRDiscordSDKError(-9, @"Discord client was shut down")
+                           identifier:pendingIdentifier];
   [self.runCallbacksTimer invalidate];
   self.runCallbacksTimer = nil;
 #if PR_HAS_DISCORD_CPP
@@ -407,16 +599,26 @@
 #pragma mark - Helpers
 
 - (void)notifyConnected {
-  dispatch_async(dispatch_get_main_queue(), ^{
-    [self.delegate discordSDKDidConnect:self];
-  });
+  if (![NSThread isMainThread]) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [self notifyConnected];
+    });
+    return;
+  }
+  [self.delegate discordSDKDidConnect:self];
 }
 
 - (void)notifyDisconnected:(NSError *)error {
+  if (![NSThread isMainThread]) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [self notifyDisconnected:error];
+    });
+    return;
+  }
   self.internalConnected = NO;
-  dispatch_async(dispatch_get_main_queue(), ^{
-    [self.delegate discordSDKDidDisconnect:self error:error];
-  });
+  NSUInteger pendingIdentifier = self.pendingActivityUpdateIdentifier;
+  [self finishActivityUpdateWithError:error identifier:pendingIdentifier];
+  [self.delegate discordSDKDidDisconnect:self error:error];
 }
 
 @end

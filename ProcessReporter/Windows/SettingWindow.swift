@@ -8,7 +8,8 @@
 import AppKit
 import SnapKit
 
-class SettingWindow: NSWindow {
+@MainActor
+final class SettingWindow: NSWindow {
 	private lazy var generalVC = PreferencesGeneralViewController()
 
 	private let rootViewController = NSViewController()
@@ -17,6 +18,7 @@ class SettingWindow: NSWindow {
 
 	// UserDefaults keys for window position and size
 	private let windowFrameKey = "SettingWindowFrame"
+	private var pendingTabSwitch: DispatchWorkItem?
 
 	convenience init() {
 		self.init(
@@ -65,8 +67,17 @@ class SettingWindow: NSWindow {
 //            centerWindowOnScreen()
 //        }
 #if DEBUG
-		let visibleFrame = NSScreen.main!.visibleFrame
-		setFrame(.init(origin: .init(x: visibleFrame.minX + 20, y: visibleFrame.height / 2 - 500), size: defaultFrameSize), display: true)
+		if let visibleFrame = NSScreen.main?.visibleFrame {
+			setFrame(
+				.init(
+					origin: .init(
+						x: visibleFrame.minX + 20,
+						y: visibleFrame.midY - defaultFrameSize.height / 2),
+					size: defaultFrameSize),
+				display: true)
+		} else {
+			setFrame(.init(origin: .zero, size: defaultFrameSize), display: true)
+		}
 #else
 		setFrame(.init(origin: .zero, size: defaultFrameSize), display: true)
 		centerWindowOnScreen()
@@ -127,7 +138,18 @@ class SettingWindow: NSWindow {
 		case .mapping:
 			vcType = PreferencesMappingViewController.self
 		}
+		let cancelledPendingSwitch = pendingTabSwitch != nil
+		pendingTabSwitch?.cancel()
+		pendingTabSwitch = nil
+		if cancelledPendingSwitch {
+			for child in rootViewController.children {
+				child.view.layer?.removeAnimation(forKey: "fadeOut")
+				child.view.alphaValue = 1
+			}
+		}
+
 		if currentViewController?.isKind(of: vcType.classForCoder()) == true {
+			toolbar?.selectedItemIdentifier = NSToolbarItem.Identifier(rawValue: tab.rawValue)
 			return
 		}
 
@@ -141,15 +163,15 @@ class SettingWindow: NSWindow {
 			fadeOutAnimation.duration = 0.2
 			fadeOutAnimation.damping = 12
 			fadeOutAnimation.initialVelocity = 5
-			fadeOutAnimation.isRemovedOnCompletion = false
-			fadeOutAnimation.fillMode = .forwards
+			fadeOutAnimation.isRemovedOnCompletion = true
 
 			child.view.layer?.add(fadeOutAnimation, forKey: "fadeOut")
 		}
 
 		// 延迟一小段时间后切换视图
-		DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+		let workItem = DispatchWorkItem { [weak self] in
 			guard let self = self else { return }
+			self.pendingTabSwitch = nil
 
 			// Remove existing view controllers
 			for child in self.rootViewController.children {
@@ -172,20 +194,19 @@ class SettingWindow: NSWindow {
 			fadeInAnimation.duration = 0.2
 			fadeInAnimation.damping = 12
 			fadeInAnimation.initialVelocity = 5
-			fadeInAnimation.isRemovedOnCompletion = false
-			fadeInAnimation.fillMode = .forwards
+			fadeInAnimation.isRemovedOnCompletion = true
 
 			vc.view.layer?.add(fadeInAnimation, forKey: "fadeIn")
 			vc.view.alphaValue = 1
 
 			self.toolbar?.selectedItemIdentifier = NSToolbarItem.Identifier(rawValue: tab.rawValue)
 
-			let targetSize =
-				((vc as? SettingWindowProtocol) != nil)
-					? (vc as! SettingWindowProtocol).frameSize : self.defaultFrameSize
+			let targetSize = (vc as? SettingWindowProtocol)?.frameSize ?? self.defaultFrameSize
 
 			self.adjustFrameForNewContentSize(targetSize)
 		}
+		pendingTabSwitch = workItem
+		DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: workItem)
 	}
 
 	enum TabIdentifier: String {
@@ -224,19 +245,13 @@ class SettingWindow: NSWindow {
 				// 默认向下调整（保持窗口顶部位置不变）
 				frame.origin.y = frame.origin.y + (frame.height - newHeight)
 
-				// 检查是否会超出屏幕底部
-				if frame.origin.y < screenFrame.origin.y {
-					// 如果会超出屏幕底部，先将窗口底部对齐到屏幕可见区域底部
-					let screenBottom = screenFrame.origin.y
-
-					// 计算需要向上移动的距离
-					let adjustmentNeeded = frame.origin.y - screenBottom // 这是负值，表示超出的距离
-
-					// 设置新的 Y 坐标（窗口底部对齐屏幕可见区域底部，然后向上调整超出的距离）
-					frame.origin.y = self.frame.origin.y + adjustmentNeeded
-				}
-
 				frame.size = newWindowSize
+				frame.origin.y = max(
+					screenFrame.minY,
+					min(frame.origin.y, screenFrame.maxY - min(frame.height, screenFrame.height)))
+				frame.origin.x = max(
+					screenFrame.minX,
+					min(frame.origin.x, screenFrame.maxX - min(frame.width, screenFrame.width)))
 
 				animator().setFrame(frame, display: true)
 			}, completionHandler: nil)
@@ -316,11 +331,11 @@ extension SettingWindow: NSToolbarDelegate {
 
 extension SettingWindow: NSWindowDelegate {
 	func windowShouldClose(_ sender: NSWindow) -> Bool {
-		SettingWindowManager.shared.closeWindow()
-		return false
+		return true
 	}
 
 	func windowWillClose(_ notification: Notification) {
+		SettingWindowManager.shared.windowDidClose(self)
 		NSApp.setActivationPolicy(.accessory)
 	}
 
@@ -330,8 +345,7 @@ extension SettingWindow: NSWindowDelegate {
 	}
 
 	func windowDidResignKey(_ notification: Notification) {
-		let sender = notification.object as! NSWindow
-		if !sender.isVisible {
+		if let sender = notification.object as? NSWindow, !sender.isVisible {
 			NSApp.setActivationPolicy(.accessory)
 		}
 	}

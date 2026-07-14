@@ -8,7 +8,8 @@
 import AppKit
 import SnapKit
 
-class PreferencesIntegrationMixSpaceView: IntegrationView {
+@MainActor
+final class PreferencesIntegrationMixSpaceView: IntegrationView {
     // Controls
     private let enabledButton: NSButton
     private let endpointInput: NSTextField
@@ -77,13 +78,40 @@ class PreferencesIntegrationMixSpaceView: IntegrationView {
     @objc
     private func save() {
         // Save the integration settings
-        var integration = PreferencesDataModel.shared.mixSpaceIntegration.value
+        let previousIntegration = PreferencesDataModel.shared.mixSpaceIntegration.value
+        var integration = previousIntegration
         integration.isEnabled = enabledButton.state == .on
-        integration.endpoint = endpointInput.stringValue
+        integration.endpoint = endpointInput.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         integration.requestMethod = methodSelect.selectedItem?.title ?? "POST"
-        integration.apiToken = apiKeyInput.stringValue
+        integration.apiToken = apiKeyInput.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if integration.isEnabled {
+            guard let components = URLComponents(string: integration.endpoint),
+                  let scheme = components.scheme?.lowercased(),
+                  ["http", "https"].contains(scheme),
+                  let host = components.host,
+                  scheme == "https" || isLoopbackHost(host)
+            else {
+                ToastManager.shared.error(
+                    "Mix Space endpoint must use HTTPS; HTTP is allowed only for localhost")
+                return
+            }
+            guard !integration.apiToken.isEmpty else {
+                ToastManager.shared.error("Mix Space API key is required when the integration is enabled")
+                return
+            }
+        }
+        guard integration.persistCredentialChanges(comparedTo: previousIntegration) else {
+            ToastManager.shared.error("Could not update the Mix Space API key in Keychain")
+            return
+        }
         PreferencesDataModel.shared.mixSpaceIntegration.accept(integration)
         ToastManager.shared.success("Saved!")
+    }
+
+    private func isLoopbackHost(_ host: String) -> Bool {
+        let normalized = host.lowercased()
+        return normalized == "localhost" || normalized == "::1" || normalized.hasPrefix("127.")
     }
 
     private func setupGridView() {

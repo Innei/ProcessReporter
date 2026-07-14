@@ -45,19 +45,44 @@ private let descriptionDictionary: [String: String] = [
     "Capture One": "调色",
 ]
 
+private func isLoopbackHost(_ host: String) -> Bool {
+    let normalized = host.lowercased()
+    return normalized == "localhost" || normalized == "::1" || normalized.hasPrefix("127.")
+}
+
+@MainActor
 private func sendMixSpaceRequest(data: ReportModel) async -> Result<Void, ReporterError> {
     let config = PreferencesDataModel.shared.mixSpaceIntegration.value
     let endpoint = config.endpoint
     let method = config.requestMethod
     let token = config.apiToken
 
+    guard !token.isEmpty else {
+        return .failure(.unknown(message: "Missing MixSpace API token", successIntegrations: []))
+    }
+    guard let components = URLComponents(string: endpoint),
+        let scheme = components.scheme?.lowercased(),
+        (scheme == "https" || scheme == "http"),
+        let host = components.host,
+        components.user == nil,
+        components.password == nil,
+        let endpointURL = components.url
+    else {
+        return .failure(.cancelled(message: "Invalid MixSpace HTTP endpoint"))
+    }
+    guard scheme == "https" || isLoopbackHost(host) else {
+        return .failure(
+            .cancelled(message: "MixSpace API tokens require HTTPS except on localhost")
+        )
+    }
+
     let iconUrl = await DataStore.shared.iconURL(for: data.processInfoRaw?.applicationIdentifier ?? "")
 
     var description: String?
 
     if let processName = data.processName {
-        if descriptionDictionary.keys.contains(processName), let title = data.processInfoRaw?.title,
-            let prefix = descriptionDictionary[processName]
+        if let prefix = descriptionDictionary[processName],
+            let title = data.processInfoRaw?.title
         {
             description = prefix + "\n" + title
         }
@@ -82,11 +107,14 @@ private func sendMixSpaceRequest(data: ReportModel) async -> Result<Void, Report
 
     do {
         _ = try await AF.request(
-            endpoint,
-            method: .init(rawValue: method),
+            endpointURL,
+            method: .init(rawValue: method.uppercased()),
             parameters: requestPayload,
             encoder: JSONParameterEncoder.default,
-            headers: headers
+            headers: headers,
+            requestModifier: { request in
+                request.timeoutInterval = 10
+            }
         )
         .validate()
         .serializingData()

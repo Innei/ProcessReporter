@@ -10,7 +10,8 @@ import os.log
 import ServiceManagement
 import SnapKit
 
-class PreferencesGeneralViewController: NSViewController, SettingWindowProtocol {
+@MainActor
+final class PreferencesGeneralViewController: NSViewController, SettingWindowProtocol {
     private let logger = Logger()
     final let frameSize: NSSize = .init(width: 600, height: 320)
 
@@ -180,9 +181,11 @@ extension PreferencesGeneralViewController {
 
 extension PreferencesGeneralViewController {
     @objc private func switchInterval(sender: NSPopUpButton) {
-        let label = sender.itemTitles[sender.indexOfSelectedItem]
+        guard let label = sender.selectedItem?.title,
+              let interval = SendInterval.labelToValue(label)
+        else { return }
         PreferencesDataModel.shared.sendInterval.accept(
-            SendInterval.labelToValue(label) ?? .tenSeconds)
+            interval)
     }
 
     @objc private func enabledButtonClicked(sender: NSButton) {
@@ -198,18 +201,30 @@ extension PreferencesGeneralViewController {
 
         do {
             if isOn {
-                if SMAppService.mainApp.status == .enabled {
-                    try? SMAppService.mainApp.unregister()
+                switch SMAppService.mainApp.status {
+                case .enabled:
+                    break
+                case .requiresApproval:
+                    ToastManager.shared.warning(
+                        "Allow ProcessReporter in System Settings > General > Login Items")
+                default:
+                    try SMAppService.mainApp.register()
                 }
-
-                try SMAppService.mainApp.register()
             } else {
-                try SMAppService.mainApp.unregister()
+                switch SMAppService.mainApp.status {
+                case .notRegistered, .notFound:
+                    break
+                default:
+                    try SMAppService.mainApp.unregister()
+                }
             }
+            sender.state = checkWasLaunchedAtLogin() ? .on : .off
         } catch {
             logger.error(
                 "Failed to \(isOn ? "enable" : "disable") launch at login: \(error.localizedDescription)"
             )
+            sender.state = checkWasLaunchedAtLogin() ? .on : .off
+            ToastManager.shared.error("Could not update launch at login: \(error.localizedDescription)")
         }
     }
 
@@ -249,33 +264,25 @@ extension PreferencesGeneralViewController {
 
         let fileName = "ProcessReporterData.plist"
 
-        let data = PreferencesDataModel.shared.exportToPlist()
-        guard let data = data else { return }
+        guard let data = PreferencesDataModel.shared.exportToPlist() else {
+            ToastManager.shared.error("Export failed: Settings could not be encoded")
+            return
+        }
 
         if openPanel.runModal() == .OK {
             guard let selectedURL = openPanel.url else {
                 return
             }
 
-            let fileManager = FileManager.default
             let filePathURL = selectedURL.appendingPathComponent(fileName)
-            let filePath = filePathURL.path
 
             do {
-                // 检查文件是否已存在
-                if fileManager.fileExists(atPath: filePath) {
-                    try fileManager.removeItem(atPath: filePath)
-                }
-
+                // Atomic writing preserves the existing backup if the new write fails.
                 try data.write(to: filePathURL, options: [.atomic])
-
-                print("文件创建成功，路径: \(filePath)")
-
+                ToastManager.shared.success("Settings exported successfully; credentials were excluded")
             } catch {
-                print("创建文件失败: \(error.localizedDescription)")
+                ToastManager.shared.error("Export failed: \(error.localizedDescription)")
             }
-        } else {
-            print("用户取消了选择")
         }
     }
 

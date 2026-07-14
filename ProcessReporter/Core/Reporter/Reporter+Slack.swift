@@ -16,6 +16,11 @@ private struct ProfileData: Codable {
 	var status_expiration: Int
 }
 
+private struct SlackAPIResponse: Decodable {
+	let ok: Bool
+	let error: String?
+}
+
 private let slackRatelimiter = Ratelimiter(
 	capacity: 1,
 	refillRate: 10.0 / 60.0,  // 每分钟十个请求
@@ -28,8 +33,9 @@ private let allowedTemplateVariants: Set<String> = [
 	"{artist}",
 	"{media_name_artist}",
 	"{process_name}",
-	"{media_name}",
 ]
+
+private let maximumSlackStatusDuration = 366 * 24 * 60 * 60
 
 class SlackReporterExtension: ReporterExtension {
 	var name: String = "Slack"
@@ -44,10 +50,6 @@ class SlackReporterExtension: ReporterExtension {
 			guard slackConfig.isEnabled else {
 				return .failure(.ignored)
 			}
-			guard slackRatelimiter.tryAcquire() else {
-				return .failure(.ratelimitExceeded(message: "Slack integration is rate limited"))
-			}
-
 			var statusText = slackConfig.statusTextTemplateString
 			if let mediaProcessName = data.mediaProcessName {
 				statusText = slackConfig.statusTextTemplateString.replacingOccurrences(
@@ -58,11 +60,11 @@ class SlackReporterExtension: ReporterExtension {
 				statusText = statusText.replacingOccurrences(of: "{media_name}", with: mediaName)
 			}
 
-			if let artistName = data.mediaInfoRaw?.artist {
+			if let artistName = data.artist {
 				statusText = statusText.replacingOccurrences(of: "{artist}", with: artistName)
 			}
 
-			if let mediaName = data.mediaName, let artistName = data.mediaInfoRaw?.artist {
+			if let mediaName = data.mediaName, let artistName = data.artist {
 				statusText = statusText.replacingOccurrences(
 					of: "{media_name_artist}", with: "\(artistName) - \(mediaName)")
 			}
@@ -71,13 +73,10 @@ class SlackReporterExtension: ReporterExtension {
 				statusText = statusText.replacingOccurrences(
 					of: "{process_name}", with: processName)
 			}
-			let statusExpiration = {
-				let currentDate = Date()
-				let duration = Int(data.mediaDuration ?? Double(slackConfig.expiration))
-				return Calendar.current.date(
-					byAdding: .second, value: duration, to: currentDate)!
-					.timeIntervalSince1970
-			}()
+			let statusExpiration = Self.expirationTimestamp(
+				data: data,
+				fallbackDuration: slackConfig.expiration
+			)
 
 			let hasUnreplacedTemplate = allowedTemplateVariants.contains { template in
 				statusText.contains(template)
@@ -85,7 +84,7 @@ class SlackReporterExtension: ReporterExtension {
 
 			var profile: ProfileData = .init(
 				status_text: statusText, status_emoji: slackConfig.globalCustomEmoji,
-				status_expiration: Int(statusExpiration))
+				status_expiration: statusExpiration)
 
 			// Apply custom emoji conditions if available
 			let conditions = slackConfig.customEmojiConditionList.getConditions()
@@ -116,7 +115,11 @@ class SlackReporterExtension: ReporterExtension {
 				}
 				profile.status_text = slackConfig.defaultStatusText
 				profile.status_emoji = slackConfig.defaultEmoji
-				profile.status_expiration = 3600
+				profile.status_expiration = Self.expirationTimestamp(
+					duration: Double(
+						min(max(1, slackConfig.expiration), maximumSlackStatusDuration)
+					)
+				)
 			}
 
 			let token = slackConfig.apiToken
@@ -125,21 +128,31 @@ class SlackReporterExtension: ReporterExtension {
 				return .failure(
 					.unknown(message: "Missing Slack Api Token", successIntegrations: []))
 			}
+			guard slackRatelimiter.tryAcquire() else {
+				return .failure(.ratelimitExceeded(message: "Slack integration is rate limited"))
+			}
 			do {
 				let headers: HTTPHeaders = [
 					"Authorization": "Bearer " + token,
 					"Content-Type": "application/json; charset=utf-8",
 				]
-				_ = try await AF.request(
+				let response = try await AF.request(
 					URL(string: stackEndpoint)!,
 					method: .post,
 					parameters: ["profile": profile],
 					encoder: JSONParameterEncoder.default,
-					headers: headers
+					headers: headers,
+					requestModifier: { request in
+						request.timeoutInterval = 10
+					}
 				)
 				.validate()
-				.serializingData()
+				.serializingDecodable(SlackAPIResponse.self)
 				.value
+				guard response.ok else {
+					let reason = response.error ?? "unknown_error"
+					return .failure(.networkError("Slack API rejected request: \(reason)"))
+				}
 
 			} catch {
 				NSLog(
@@ -150,6 +163,37 @@ class SlackReporterExtension: ReporterExtension {
 
 			return .success(())
 		}
+	}
+
+	private static func expirationTimestamp(
+		data: ReportModel,
+		fallbackDuration: Int
+	) -> Int {
+		let fallback = min(max(1, fallbackDuration), maximumSlackStatusDuration)
+		var duration = Double(fallback)
+
+		if let mediaDuration = data.mediaDuration, mediaDuration.isFinite, mediaDuration > 0 {
+			let elapsed = data.mediaElapsedTime.flatMap { value in
+				value.isFinite ? max(0, value) : nil
+			} ?? 0
+			duration = min(
+				Double(maximumSlackStatusDuration),
+				max(1, mediaDuration - elapsed)
+			)
+		}
+
+		return expirationTimestamp(duration: duration)
+	}
+
+	private static func expirationTimestamp(duration: Double) -> Int {
+		let boundedDuration = min(
+			Double(maximumSlackStatusDuration),
+			max(1, duration.isFinite ? duration : 1)
+		)
+		let now = Int(Date().timeIntervalSince1970.rounded(.down))
+		let seconds = Int(boundedDuration.rounded(.up))
+		let result = now.addingReportingOverflow(seconds)
+		return result.overflow ? Int.max : result.partialValue
 	}
 
 	private func checkConditionMatch(
@@ -167,7 +211,7 @@ class SlackReporterExtension: ReporterExtension {
 		case .mediaName:
 			actualValue = data.mediaName
 		case .artist:
-			actualValue = data.mediaInfoRaw?.artist
+			actualValue = data.artist
 		case .processApplicationIdentifier:
 			actualValue = data.processInfoRaw?.applicationIdentifier
 		case .mediaProcessName:

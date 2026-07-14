@@ -9,6 +9,30 @@ import Foundation
 import RxCocoa
 import RxSwift
 
+enum IntegrationCredentialAccount {
+	static let mixSpaceToken = "mixspace.api-token"
+	static let slackToken = "slack.api-token"
+	static let s3AccessKey = "s3.access-key"
+	static let s3SecretKey = "s3.secret-key"
+}
+
+private func encodeIntegrationForUserDefaults<Value: Encodable>(_ value: Value) -> Any? {
+	let encoder = JSONEncoder()
+	encoder.outputFormatting = .sortedKeys
+	guard let data = try? encoder.encode(value) else { return nil }
+	return String(data: data, encoding: .utf8)
+}
+
+private func decodeIntegrationFromUserDefaults<Value: Decodable>(
+	_ value: Any?,
+	as type: Value.Type
+) -> Value? {
+	guard let string = value as? String,
+		let data = string.data(using: .utf8)
+	else { return nil }
+	return try? JSONDecoder().decode(type, from: data)
+}
+
 struct MixSpaceIntegration: UserDefaultsJSONStorable, DictionaryConvertible {
 	var isEnabled: Bool = false
 	var apiToken: String = ""
@@ -97,6 +121,20 @@ extension PreferencesDataModel {
 }
 
 extension MixSpaceIntegration {
+	private enum CodingKeys: String, CodingKey {
+		case isEnabled, apiToken, endpoint, requestMethod
+	}
+
+	init(from decoder: Decoder) throws {
+		self.init()
+		let container = try decoder.container(keyedBy: CodingKeys.self)
+		isEnabled = (try? container.decode(Bool.self, forKey: .isEnabled)) ?? isEnabled
+		apiToken = (try? container.decode(String.self, forKey: .apiToken)) ?? apiToken
+		endpoint = (try? container.decode(String.self, forKey: .endpoint)) ?? endpoint
+		requestMethod = (try? container.decode(String.self, forKey: .requestMethod))
+			?? requestMethod
+	}
+
 	static func fromDictionary(_ dict: Any) -> MixSpaceIntegration {
 		guard let dict = dict as? [String: Any] else { return MixSpaceIntegration() }
 		var integration = MixSpaceIntegration()
@@ -106,9 +144,76 @@ extension MixSpaceIntegration {
 		integration.requestMethod = dict["requestMethod"] as? String ?? "POST"
 		return integration
 	}
+
+	func toStorable() -> Any? {
+		var storedValue = self
+		storedValue.apiToken = ""
+		return encodeIntegrationForUserDefaults(storedValue)
+	}
+
+	static func fromStorable(_ value: Any?) -> MixSpaceIntegration? {
+		var integration = decodeIntegrationFromUserDefaults(value, as: Self.self) ?? .init()
+		if !integration.apiToken.isEmpty {
+			if CredentialStore.store(
+				integration.apiToken,
+				for: IntegrationCredentialAccount.mixSpaceToken
+			) {
+				var sanitized = integration
+				sanitized.apiToken = ""
+				if let storedValue = encodeIntegrationForUserDefaults(sanitized) {
+					UserDefaults.standard.set(storedValue, forKey: "mixSpaceIntegration")
+				}
+			}
+		} else {
+			integration.apiToken = CredentialStore.value(
+				for: IntegrationCredentialAccount.mixSpaceToken
+			) ?? ""
+		}
+		return integration
+	}
+
+	func persistCredentialChanges(comparedTo previous: Self) -> Bool {
+		CredentialStore.apply([
+			.init(
+				account: IntegrationCredentialAccount.mixSpaceToken,
+				previousValue: previous.apiToken,
+				newValue: apiToken
+			)
+		])
+	}
+
+	func exportDictionary() -> [String: Any] {
+		var dictionary = toDictionary()
+		dictionary.removeValue(forKey: "apiToken")
+		return dictionary
+	}
 }
 
 extension SlackIntegration {
+	private enum CodingKeys: String, CodingKey {
+		case isEnabled, apiToken, globalCustomEmoji, statusTextTemplateString
+		case expiration, defaultEmoji, defaultStatusText, customEmojiConditionList
+	}
+
+	init(from decoder: Decoder) throws {
+		self.init()
+		let container = try decoder.container(keyedBy: CodingKeys.self)
+		isEnabled = (try? container.decode(Bool.self, forKey: .isEnabled)) ?? isEnabled
+		apiToken = (try? container.decode(String.self, forKey: .apiToken)) ?? apiToken
+		globalCustomEmoji = (try? container.decode(String.self, forKey: .globalCustomEmoji))
+			?? globalCustomEmoji
+		statusTextTemplateString = (try? container.decode(
+			String.self, forKey: .statusTextTemplateString)) ?? statusTextTemplateString
+		expiration = (try? container.decode(Int.self, forKey: .expiration)) ?? expiration
+		defaultEmoji = (try? container.decode(String.self, forKey: .defaultEmoji))
+			?? defaultEmoji
+		defaultStatusText = (try? container.decode(String.self, forKey: .defaultStatusText))
+			?? defaultStatusText
+		customEmojiConditionList = (try? container.decode(
+			EmojiConditionList.self, forKey: .customEmojiConditionList))
+			?? customEmojiConditionList
+	}
+
 	static func fromDictionary(_ dict: Any) -> SlackIntegration {
 		guard let dict = dict as? [String: Any] else { return SlackIntegration() }
 		var integration = SlackIntegration()
@@ -124,9 +229,70 @@ extension SlackIntegration {
 		}
 		return integration
 	}
+
+	func toStorable() -> Any? {
+		var storedValue = self
+		storedValue.apiToken = ""
+		return encodeIntegrationForUserDefaults(storedValue)
+	}
+
+	static func fromStorable(_ value: Any?) -> SlackIntegration? {
+		var integration = decodeIntegrationFromUserDefaults(value, as: Self.self) ?? .init()
+		if !integration.apiToken.isEmpty {
+			if CredentialStore.store(
+				integration.apiToken,
+				for: IntegrationCredentialAccount.slackToken
+			) {
+				var sanitized = integration
+				sanitized.apiToken = ""
+				if let storedValue = encodeIntegrationForUserDefaults(sanitized) {
+					UserDefaults.standard.set(storedValue, forKey: "slackIntegration")
+				}
+			}
+		} else {
+			integration.apiToken = CredentialStore.value(
+				for: IntegrationCredentialAccount.slackToken
+			) ?? ""
+		}
+		return integration
+	}
+
+	func persistCredentialChanges(comparedTo previous: Self) -> Bool {
+		CredentialStore.apply([
+			.init(
+				account: IntegrationCredentialAccount.slackToken,
+				previousValue: previous.apiToken,
+				newValue: apiToken
+			)
+		])
+	}
+
+	func exportDictionary() -> [String: Any] {
+		var dictionary = toDictionary()
+		dictionary.removeValue(forKey: "apiToken")
+		return dictionary
+	}
 }
 
 extension S3Integration {
+	private enum CodingKeys: String, CodingKey {
+		case isEnabled, bucket, region, accessKey, secretKey, endpoint, path, customDomain
+	}
+
+	init(from decoder: Decoder) throws {
+		self.init()
+		let container = try decoder.container(keyedBy: CodingKeys.self)
+		isEnabled = (try? container.decode(Bool.self, forKey: .isEnabled)) ?? isEnabled
+		bucket = (try? container.decode(String.self, forKey: .bucket)) ?? bucket
+		region = (try? container.decode(String.self, forKey: .region)) ?? region
+		accessKey = (try? container.decode(String.self, forKey: .accessKey)) ?? accessKey
+		secretKey = (try? container.decode(String.self, forKey: .secretKey)) ?? secretKey
+		endpoint = (try? container.decode(String.self, forKey: .endpoint)) ?? endpoint
+		path = (try? container.decode(String.self, forKey: .path)) ?? path
+		customDomain = (try? container.decode(String.self, forKey: .customDomain))
+			?? customDomain
+	}
+
 	static func fromDictionary(_ dict: Any) -> S3Integration {
 		guard let dict = dict as? [String: Any] else { return S3Integration() }
 
@@ -140,6 +306,74 @@ extension S3Integration {
 		integration.path = dict["path"] as? String ?? ""
 		integration.customDomain = dict["customDomain"] as? String ?? ""
 		return integration
+	}
+
+	func toStorable() -> Any? {
+		var storedValue = self
+		storedValue.accessKey = ""
+		storedValue.secretKey = ""
+		return encodeIntegrationForUserDefaults(storedValue)
+	}
+
+	static func fromStorable(_ value: Any?) -> S3Integration? {
+		var integration = decodeIntegrationFromUserDefaults(value, as: Self.self) ?? .init()
+		var migratedStorage = integration
+		var didMigrateCredential = false
+		if !integration.accessKey.isEmpty {
+			if CredentialStore.store(
+				integration.accessKey,
+				for: IntegrationCredentialAccount.s3AccessKey
+			) {
+				migratedStorage.accessKey = ""
+				didMigrateCredential = true
+			}
+		} else {
+			integration.accessKey = CredentialStore.value(
+				for: IntegrationCredentialAccount.s3AccessKey
+			) ?? ""
+		}
+
+		if !integration.secretKey.isEmpty {
+			if CredentialStore.store(
+				integration.secretKey,
+				for: IntegrationCredentialAccount.s3SecretKey
+			) {
+				migratedStorage.secretKey = ""
+				didMigrateCredential = true
+			}
+		} else {
+			integration.secretKey = CredentialStore.value(
+				for: IntegrationCredentialAccount.s3SecretKey
+			) ?? ""
+		}
+		if didMigrateCredential,
+		   let storedValue = encodeIntegrationForUserDefaults(migratedStorage)
+		{
+			UserDefaults.standard.set(storedValue, forKey: "s3Integration")
+		}
+		return integration
+	}
+
+	func persistCredentialChanges(comparedTo previous: Self) -> Bool {
+		CredentialStore.apply([
+			.init(
+				account: IntegrationCredentialAccount.s3AccessKey,
+				previousValue: previous.accessKey,
+				newValue: accessKey
+			),
+			.init(
+				account: IntegrationCredentialAccount.s3SecretKey,
+				previousValue: previous.secretKey,
+				newValue: secretKey
+			),
+		])
+	}
+
+	func exportDictionary() -> [String: Any] {
+		var dictionary = toDictionary()
+		dictionary.removeValue(forKey: "accessKey")
+		dictionary.removeValue(forKey: "secretKey")
+		return dictionary
 	}
 }
 
@@ -171,6 +405,40 @@ struct DiscordIntegration: UserDefaultsJSONStorable, DictionaryConvertible {
 }
 
 extension DiscordIntegration {
+	private enum CodingKeys: String, CodingKey {
+		case isEnabled, applicationId, showProcessInfo, showMediaInfo, prioritizeMedia
+		case useListeningForMedia, showTimestamps, customLargeImageKey
+		case customLargeImageText, brandSmallImageKey, enableButtons, buttonLabel, buttonUrl
+	}
+
+	init(from decoder: Decoder) throws {
+		self.init()
+		let container = try decoder.container(keyedBy: CodingKeys.self)
+		isEnabled = (try? container.decode(Bool.self, forKey: .isEnabled)) ?? isEnabled
+		applicationId = (try? container.decode(String.self, forKey: .applicationId))
+			?? applicationId
+		showProcessInfo = (try? container.decode(Bool.self, forKey: .showProcessInfo))
+			?? showProcessInfo
+		showMediaInfo = (try? container.decode(Bool.self, forKey: .showMediaInfo))
+			?? showMediaInfo
+		prioritizeMedia = (try? container.decode(Bool.self, forKey: .prioritizeMedia))
+			?? prioritizeMedia
+		useListeningForMedia = (try? container.decode(
+			Bool.self, forKey: .useListeningForMedia)) ?? useListeningForMedia
+		showTimestamps = (try? container.decode(Bool.self, forKey: .showTimestamps))
+			?? showTimestamps
+		customLargeImageKey = (try? container.decode(String.self, forKey: .customLargeImageKey))
+			?? customLargeImageKey
+		customLargeImageText = (try? container.decode(
+			String.self, forKey: .customLargeImageText)) ?? customLargeImageText
+		brandSmallImageKey = (try? container.decode(String.self, forKey: .brandSmallImageKey))
+			?? brandSmallImageKey
+		enableButtons = (try? container.decode(Bool.self, forKey: .enableButtons))
+			?? enableButtons
+		buttonLabel = (try? container.decode(String.self, forKey: .buttonLabel)) ?? buttonLabel
+		buttonUrl = (try? container.decode(String.self, forKey: .buttonUrl)) ?? buttonUrl
+	}
+
     static func fromDictionary(_ dict: Any) -> DiscordIntegration {
         guard let dict = dict as? [String: Any] else { return DiscordIntegration() }
         var integration = DiscordIntegration()

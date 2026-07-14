@@ -67,40 +67,36 @@ actor Database {
             )
             print("Database initialized successfully with migration plan")
         } catch {
-            // If migration fails, remove the old database and create a new one
-            print("Migration failed with error: \(error)")
-            print("Removing old database and creating new one...")
-
-            do {
-                try? fileManager.removeItem(at: fileURL)
-
-                // Try again without migration plan for a fresh start
-                modelContainer = try ModelContainer(
-                    for: schema,
-                    configurations: configuration
-                )
-                print("Database initialized successfully with fresh start")
-            } catch {
-                print("Failed to create fresh database: \(error)")
-                throw DatabaseError.migrationFailed(
-                    "Failed to create database: \(error.localizedDescription)")
-            }
+            // Container creation can fail for permissions, disk space, temporary
+            // I/O, or an incompatible schema. None of those justify silently
+            // deleting the user's activity history. Preserve the store and let
+            // the caller present a recoverable error.
+            throw DatabaseError.initializationFailed(error.localizedDescription)
         }
     }
 
     // Convenience method for performing background operations
-    func performBackgroundTask<T>(_ operation: @escaping (ModelContext) throws -> T) async throws
+    func performBackgroundTask<T>(_ operation: (ModelContext) throws -> T) async throws
         -> T
     {
         guard let container = modelContainer else {
             throw DatabaseError.contextUnavailable
         }
 
-        // Create context within the task to ensure proper lifecycle
-        return try await Task.detached {
-            let context = ModelContext(container)
-            return try operation(context)
-        }.value
+        // Database is an actor, so synchronous context operations here are
+        // serialized off the main actor. This also prevents fetch-then-insert
+        // races between independent SwiftData contexts.
+        let context = ModelContext(container)
+        return try operation(context)
+    }
+
+    func saveMainContext() async throws {
+        guard let container = modelContainer else {
+            throw DatabaseError.contextUnavailable
+        }
+        try await MainActor.run {
+            try container.mainContext.save()
+        }
     }
 
     // Batch insert with transaction support
@@ -130,6 +126,7 @@ actor Database {
 enum DatabaseError: LocalizedError {
     case invalidConfiguration
     case contextUnavailable
+    case initializationFailed(String)
     case migrationFailed(String)
 
     var errorDescription: String? {
@@ -138,6 +135,8 @@ enum DatabaseError: LocalizedError {
             return "Invalid database configuration"
         case .contextUnavailable:
             return "Database context is not available"
+        case .initializationFailed(let reason):
+            return "Database initialization failed; the existing store was preserved: \(reason)"
         case .migrationFailed(let reason):
             return "Migration failed: \(reason)"
         }
@@ -158,7 +157,7 @@ enum MigrationPlan: SchemaMigrationPlan {
 
 // Current schema for clean start
 enum CurrentSchema: VersionedSchema {
-    static var versionIdentifier = Schema.Version(1, 0, 0)
+    static let versionIdentifier = Schema.Version(1, 0, 0)
 
     static var models: [any PersistentModel.Type] {
         [ReportModel.self, IconModel.self]

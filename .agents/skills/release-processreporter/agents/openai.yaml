@@ -1,0 +1,4 @@
+interface:
+  display_name: "Release ProcessReporter"
+  short_description: "Prepare and publish signed ProcessReporter releases"
+  default_prompt: "Use $release-processreporter to prepare release notes, validate the app, and publish the next tagged release."

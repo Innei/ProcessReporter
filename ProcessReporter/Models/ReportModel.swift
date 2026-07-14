@@ -41,7 +41,7 @@ class ReportModel {
 
     // Store integrations as Data for better performance
     @Attribute
-    private var integrationsData: Data?
+    var integrationsData: Data?
 
     // External interface for integrations
     var integrations: [String] {
@@ -61,10 +61,11 @@ class ReportModel {
         mediaDuration = mediaInfo.duration
         mediaElapsedTime = mediaInfo.elapsedTime
 
-        // Convert base64 to Data
-        if let base64 = mediaInfo.image {
-            mediaImageData = Data(base64Encoded: base64)
-        }
+        // Artwork is intentionally not copied into every history row. The live
+        // menu reads it from MediaInfo, while repeated database blobs could grow
+        // a 5,000-row history to gigabytes. Keep the persisted field for schema
+        // compatibility with existing stores.
+        mediaImageData = nil
 
         mediaInfoRaw = mediaInfo
     }

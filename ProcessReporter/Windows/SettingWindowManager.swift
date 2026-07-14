@@ -8,13 +8,13 @@
 import Cocoa
 
 @MainActor
-class SettingWindowManager: NSObject {
+final class SettingWindowManager: NSObject {
     static let shared = SettingWindowManager()
     var settingWindow: SettingWindow?
 
     func showWindow() {
         // Check if we have a reference AND the window it points to hasn't been closed by the user
-        if let window = settingWindow, window.isVisible {
+        if let window = settingWindow {
             // Window exists and is presumed open, bring it to front.
             window.makeKeyAndOrderFront(nil)
         } else {
@@ -31,9 +31,17 @@ class SettingWindowManager: NSObject {
     }
 
     func closeWindow() {
-        self.settingWindow?.close()
+        let window = settingWindow
+        settingWindow = nil
+        window?.close()
         AppUtility.shared.clearCache()
-        self.settingWindow = nil
+    }
+
+    func windowDidClose(_ window: SettingWindow) {
+        if settingWindow === window {
+            settingWindow = nil
+            AppUtility.shared.clearCache()
+        }
     }
 }
 

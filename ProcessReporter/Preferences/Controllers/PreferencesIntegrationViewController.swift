@@ -14,19 +14,30 @@ enum IntegrationType: String, CaseIterable {
     case s3 = "S3"
     case discord = "Discord"
 
+    @MainActor
     func nsImage() -> NSImage {
+        let assetName: String
+        let fallbackSymbol: String
         switch self {
         case .mxSpace:
-            return NSImage(named: "mx-space")!
+            assetName = "mx-space"
+            fallbackSymbol = "network"
         case .slack:
-            return NSImage(named: "slack")!
+            assetName = "slack"
+            fallbackSymbol = "number"
         case .s3:
-            return NSImage(named: "s3")!
+            assetName = "s3"
+            fallbackSymbol = "externaldrive.badge.icloud"
         case .discord:
-			return NSImage(named: "discord")!
+            assetName = "discord"
+            fallbackSymbol = "bubble.left.and.bubble.right"
         }
+        return NSImage(named: assetName)
+            ?? NSImage(systemSymbolName: fallbackSymbol, accessibilityDescription: rawValue)
+            ?? NSImage()
     }
 
+    @MainActor
     func view() -> NSView {
         switch self {
         case .mxSpace:
@@ -41,7 +52,12 @@ enum IntegrationType: String, CaseIterable {
     }
 }
 
-class SidebarViewController: NSViewController {
+private extension Notification.Name {
+    static let integrationSelectionChanged = Notification.Name("IntegrationSelectionChanged")
+}
+
+@MainActor
+final class SidebarViewController: NSViewController {
     private lazy var tableView: NSTableView = {
         let table = NSTableView()
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("IntegrationColumn"))
@@ -98,10 +114,12 @@ extension SidebarViewController: NSTableViewDataSource, NSTableViewDelegate {
 
             let imageView = NSImageView()
             imageView.imageScaling = .scaleProportionallyDown
+            imageView.setAccessibilityRole(.image)
             cell?.addSubview(imageView)
 
             let textField = NSTextField()
             textField.isEditable = false
+            textField.isSelectable = false
             textField.isBordered = false
             textField.drawsBackground = false
             textField.backgroundColor = .clear
@@ -123,6 +141,7 @@ extension SidebarViewController: NSTableViewDataSource, NSTableViewDelegate {
 
         if let imageView = cell?.subviews.first as? NSImageView {
             imageView.image = integrationType.nsImage()
+            imageView.setAccessibilityLabel(integrationType.rawValue)
         }
         cell?.textField?.stringValue = integrationType.rawValue
 
@@ -136,13 +155,14 @@ extension SidebarViewController: NSTableViewDataSource, NSTableViewDelegate {
             let selectedType = IntegrationType.allCases[selectedRow]
             // 通知主视图控制器更新右侧内容
             NotificationCenter.default.post(
-                name: .init("IntegrationSelectionChanged"),
+                name: .integrationSelectionChanged,
                 object: selectedType)
         }
     }
 }
 
-class PreferencesIntegrationViewController: NSViewController, SettingWindowProtocol {
+@MainActor
+final class PreferencesIntegrationViewController: NSViewController, SettingWindowProtocol {
     var frameSize: NSSize = NSSize(width: 600, height: 400)
 
     private lazy var splitViewController: NSSplitViewController = {
@@ -159,6 +179,7 @@ class PreferencesIntegrationViewController: NSViewController, SettingWindowProto
         item.canCollapse = false
         return item
     }()
+    private var pendingContentSwitch: DispatchWorkItem?
 
     override func loadView() {
         view = NSView()
@@ -183,7 +204,7 @@ class PreferencesIntegrationViewController: NSViewController, SettingWindowProto
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleIntegrationSelection(_:)),
-            name: .init("IntegrationSelectionChanged"),
+            name: .integrationSelectionChanged,
             object: nil
         )
     }
@@ -195,7 +216,16 @@ class PreferencesIntegrationViewController: NSViewController, SettingWindowProto
     }
 
     private func updateContentView(for type: IntegrationType) {
+        let cancelledPendingSwitch = pendingContentSwitch != nil
+        pendingContentSwitch?.cancel()
+        pendingContentSwitch = nil
+        if cancelledPendingSwitch {
+            rightSplitViewItem.viewController.view.layer?.removeAnimation(forKey: "fadeOut")
+            rightSplitViewItem.viewController.view.alphaValue = 1
+        }
+
         let newView = type.view()
+        newView.wantsLayer = true
         newView.alphaValue = 0
 
         // 为当前视图创建淡出动画
@@ -205,14 +235,14 @@ class PreferencesIntegrationViewController: NSViewController, SettingWindowProto
         fadeOutAnimation.duration = 0.2
         fadeOutAnimation.damping = 12  // 弹簧阻尼，值越大弹性越小
         fadeOutAnimation.initialVelocity = 5  // 初始速度
-        fadeOutAnimation.isRemovedOnCompletion = false
-        fadeOutAnimation.fillMode = .forwards
+        fadeOutAnimation.isRemovedOnCompletion = true
 
         rightSplitViewItem.viewController.view.layer?.add(fadeOutAnimation, forKey: "fadeOut")
 
         // 延迟一小段时间后切换视图并执行淡入动画
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+        let workItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
+            self.pendingContentSwitch = nil
             self.splitViewController.removeSplitViewItem(self.rightSplitViewItem)
             self.rightSplitViewItem.viewController.view.removeFromSuperview()
 
@@ -226,11 +256,12 @@ class PreferencesIntegrationViewController: NSViewController, SettingWindowProto
             fadeInAnimation.duration = 0.2
             fadeInAnimation.damping = 12
             fadeInAnimation.initialVelocity = 5
-            fadeInAnimation.isRemovedOnCompletion = false
-            fadeInAnimation.fillMode = .forwards
+            fadeInAnimation.isRemovedOnCompletion = true
 
             newView.layer?.add(fadeInAnimation, forKey: "fadeIn")
             newView.alphaValue = 1  // 设置最终状态
         }
+        pendingContentSwitch = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: workItem)
     }
 }

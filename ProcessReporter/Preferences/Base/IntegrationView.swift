@@ -7,6 +7,7 @@
 
 import Cocoa
 
+@MainActor
 class IntegrationView: NSView {
     lazy var gridView: NSGridView = {
         let gridView = NSGridView()
@@ -17,6 +18,9 @@ class IntegrationView: NSView {
 
     func setupUI() {
         let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.hasHorizontalScroller = false
         let documentView = NSView()
         documentView.addSubview(gridView)
         scrollView.documentView = documentView

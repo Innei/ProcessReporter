@@ -9,8 +9,9 @@ import SwiftUI
 // Add AppPickerView to show a dialog for selecting applications
 struct AppPickerView: View {
 	@Environment(\.dismiss) private var dismiss
-	@State private var installedApps: [AppItem] = []
+	@State private var installedApps: [InstalledApp] = []
 	@State private var searchText: String = ""
+	@State private var isLoading = true
 
 	var onSelectApp: (String?, URL?) -> Void
 
@@ -21,9 +22,18 @@ struct AppPickerView: View {
 				.padding()
 
 			List {
-				ForEach(filteredApps, id: \.id) { app in
+				if isLoading {
+					HStack {
+						Spacer()
+						ProgressView("Finding applications…")
+						Spacer()
+					}
+				}
+
+				ForEach(filteredApps) { app in
 					Button(action: {
 						onSelectApp(app.applicationIdentifier, app.url)
+						dismiss()
 					}) {
 						HStack {
 							Image(nsImage: NSWorkspace.shared.icon(forFile: app.url.path))
@@ -42,58 +52,88 @@ struct AppPickerView: View {
 				Spacer()
 				Button("Cancel") {
 					onSelectApp(nil, nil)
+					dismiss()
 				}
 				.keyboardShortcut(.cancelAction)
 			}
 			.padding()
 		}
-		.onAppear {
-			loadInstalledApps()
+		.task {
+			isLoading = true
+			installedApps = await Self.discoverInstalledApps()
+			isLoading = false
 		}
 	}
 
-	typealias AppItem = (id: String, name: String, url: URL, applicationIdentifier: String)
-	private var filteredApps: [AppItem] {
+	private struct InstalledApp: Identifiable, Sendable {
+		var id: String { applicationIdentifier }
+		let name: String
+		let url: URL
+		let applicationIdentifier: String
+	}
+
+	private var filteredApps: [InstalledApp] {
 		if searchText.isEmpty {
 			return installedApps
 		} else {
 			return installedApps.filter { app in
 				app.name.localizedCaseInsensitiveContains(searchText)
+					|| app.applicationIdentifier.localizedCaseInsensitiveContains(searchText)
 			}
 		}
 	}
 
-	private func loadInstalledApps() {
-		let fileManager = FileManager.default
-		guard
-			let appFolders = try? fileManager.contentsOfDirectory(
-				at: URL(fileURLWithPath: "/Applications"), includingPropertiesForKeys: nil
-			)
-		else {
-			return
-		}
+	private static func discoverInstalledApps() async -> [InstalledApp] {
+		await Task.detached(priority: .userInitiated) {
+			let fileManager = FileManager()
+			let roots = [
+				fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Applications"),
+				URL(fileURLWithPath: "/Applications", isDirectory: true),
+				URL(fileURLWithPath: "/System/Applications", isDirectory: true),
+			]
+			var applicationsByIdentifier: [String: InstalledApp] = [:]
 
-		var apps: [AppItem] = []
+			for root in roots where fileManager.fileExists(atPath: root.path) {
+				guard let enumerator = fileManager.enumerator(
+					at: root,
+					includingPropertiesForKeys: [.isApplicationKey, .isPackageKey],
+					options: [.skipsHiddenFiles, .skipsPackageDescendants]
+				) else { continue }
 
-		for url in appFolders {
-			if url.pathExtension == "app", let bundle = Bundle(url: url),
-			   let bundleId = bundle.bundleIdentifier
-			{
-				let appName = url.deletingPathExtension().lastPathComponent
-				apps.append((id: bundleId + url.absoluteString, name: appName, url: url, applicationIdentifier: bundleId))
+				while let url = enumerator.nextObject() as? URL {
+					guard url.pathExtension.lowercased() == "app" else { continue }
+					enumerator.skipDescendants()
+					guard let bundle = Bundle(url: url),
+					      let applicationIdentifier = bundle.bundleIdentifier,
+					      applicationsByIdentifier[applicationIdentifier] == nil
+					else { continue }
+
+					let name = (bundle.localizedInfoDictionary?["CFBundleDisplayName"] as? String)
+						?? (bundle.localizedInfoDictionary?["CFBundleName"] as? String)
+						?? url.deletingPathExtension().lastPathComponent
+					applicationsByIdentifier[applicationIdentifier] = InstalledApp(
+						name: name,
+						url: url,
+						applicationIdentifier: applicationIdentifier)
+				}
 			}
-		}
 
-		installedApps = apps.sorted(by: { $0.name < $1.name })
+			return applicationsByIdentifier.values.sorted {
+				$0.name.localizedStandardCompare($1.name) == .orderedAscending
+			}
+		}.value
 	}
 }
 
 extension AppPickerView {
 	static func showAppPicker(for anchorView: NSView, completion: @escaping (String?, URL?) -> Void) {
-		let appPicker = AppPickerView(onSelectApp: completion)
+		let popover = NSPopover()
+		let appPicker = AppPickerView { [weak popover] applicationIdentifier, url in
+			completion(applicationIdentifier, url)
+			popover?.performClose(nil)
+		}
 		let hostingController = NSHostingController(rootView: appPicker)
 
-		let popover = NSPopover()
 		popover.contentViewController = hostingController
 		popover.behavior = .transient
 		popover.contentSize = NSSize(width: 400, height: 500)

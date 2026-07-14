@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct MouseClickInfo {
-    let location: NSPoint
-    let timestamp: TimeInterval
+struct MouseClickInfo: Sendable {
+  let location: NSPoint
+  let timestamp: TimeInterval
 }

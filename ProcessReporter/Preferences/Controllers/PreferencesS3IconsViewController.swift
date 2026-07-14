@@ -9,7 +9,8 @@ import AppKit
 import Foundation
 import SnapKit
 
-class PreferencesS3IconsViewController: NSViewController, SettingWindowProtocol {
+@MainActor
+final class PreferencesS3IconsViewController: NSViewController, SettingWindowProtocol {
     final let frameSize: NSSize = .init(width: 1000, height: 500)
 
     private var tableView: NSTableView!
@@ -18,26 +19,29 @@ class PreferencesS3IconsViewController: NSViewController, SettingWindowProtocol 
     private var allResults: [IconValue] = []
     private var searchField: NSSearchField!
     private var observer: Any?
+    private var fetchTask: Task<Void, Never>?
+    private var fetchGeneration = 0
+    private var sortKey: DataStore.IconSortKey = .name
+    private var sortAscending = true
 
     override func loadView() {
         view = NSView(frame: NSRect(origin: .zero, size: frameSize))
         setupTableView()
         setupToolbar()
         setupContextMenu()
-        fetchData()
         addCloseButton()
     }
 
     override func viewDidAppear() {
+        super.viewDidAppear()
         startObservingChanges()
+        fetchData()
     }
 
     override func viewWillDisappear() {
+        super.viewWillDisappear()
         stopObservingChanges()
-    }
-
-    deinit {
-        stopObservingChanges()
+        cancelFetch()
     }
 
     private func setupToolbar() {
@@ -190,31 +194,49 @@ class PreferencesS3IconsViewController: NSViewController, SettingWindowProtocol 
     }
 
     private func startObservingChanges() {
+        guard observer == nil else { return }
         observer = NotificationCenter.default.addObserver(
             forName: DataStore.changedNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.fetchData()
+            Task { @MainActor [weak self] in
+                self?.fetchData()
+            }
         }
     }
 
     private func stopObservingChanges() {
         if let observer = observer {
             NotificationCenter.default.removeObserver(observer)
+            self.observer = nil
         }
     }
 
+    private func cancelFetch() {
+        fetchGeneration += 1
+        fetchTask?.cancel()
+        fetchTask = nil
+    }
+
     private func fetchData() {
-        Task { @MainActor in
-            let results = await DataStore.shared.fetchIconsSorted(by: .name, ascending: true)
-            allResults = results
-            if let searchText = searchField?.stringValue, !searchText.isEmpty {
-                filterResultsWithSearchText(searchText)
-            } else {
-                fetchedResults = allResults
-            }
-            tableView.reloadData()
+        fetchGeneration += 1
+        let generation = fetchGeneration
+        let requestedSortKey = sortKey
+        let requestedSortAscending = sortAscending
+        fetchTask?.cancel()
+
+        fetchTask = Task { @MainActor [weak self] in
+            let results = await DataStore.shared.fetchIconsSorted(
+                by: requestedSortKey, ascending: requestedSortAscending)
+            guard let self,
+                  !Task.isCancelled,
+                  generation == self.fetchGeneration
+            else { return }
+
+            self.allResults = results
+            self.filterResultsWithSearchText(self.searchField?.stringValue ?? "")
+            self.fetchTask = nil
         }
     }
 
@@ -320,9 +342,11 @@ class PreferencesS3IconsViewController: NSViewController, SettingWindowProtocol 
 
         let model = fetchedResults[tableView.clickedRow]
 
-        if let url = URL(string: model.url) {
-            NSWorkspace.shared.open(url)
+        guard let url = validatedWebURL(from: model.url) else {
+            ToastManager.shared.error("The stored icon URL is invalid")
+            return
         }
+        NSWorkspace.shared.open(url)
     }
 
     @objc private func deleteIcon() {
@@ -348,7 +372,8 @@ class PreferencesS3IconsViewController: NSViewController, SettingWindowProtocol 
                         applicationIdentifier: model.applicationIdentifier)
                     fetchData()
                 } catch {
-                    print("Failed to delete icon: \(error)")
+                    ToastManager.shared.error(
+                        "Failed to delete icon: \(error.localizedDescription)")
                 }
             }
         }
@@ -382,9 +407,20 @@ class PreferencesS3IconsViewController: NSViewController, SettingWindowProtocol 
         }
 
         let model = fetchedResults[tableView.clickedRow]
-        if let url = URL(string: model.url) {
-            NSWorkspace.shared.open(url)
+        guard let url = validatedWebURL(from: model.url) else {
+            ToastManager.shared.error("The stored icon URL is invalid")
+            return
         }
+        NSWorkspace.shared.open(url)
+    }
+
+    private func validatedWebURL(from value: String) -> URL? {
+        guard let components = URLComponents(string: value),
+              let scheme = components.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              components.host != nil
+        else { return nil }
+        return components.url
     }
 }
 
@@ -400,25 +436,14 @@ extension PreferencesS3IconsViewController: NSTableViewDataSource {
     ) {
         guard let sortDescriptor = tableView.sortDescriptors.first else { return }
 
-        Task { @MainActor in
-            let keyPath = sortDescriptor.key ?? "name"
-            let ascending = sortDescriptor.ascending
-            let sortKey: DataStore.IconSortKey
-            switch keyPath {
-            case "name": sortKey = .name
-            case "applicationIdentifier": sortKey = .applicationIdentifier
-            case "url": sortKey = .url
-            default: sortKey = .name
-            }
-
-            allResults = await DataStore.shared.fetchIconsSorted(by: sortKey, ascending: ascending)
-            if let searchText = searchField?.stringValue, !searchText.isEmpty {
-                filterResultsWithSearchText(searchText)
-            } else {
-                fetchedResults = allResults
-            }
-            tableView.reloadData()
+        switch sortDescriptor.key ?? "name" {
+        case "name": sortKey = .name
+        case "applicationIdentifier": sortKey = .applicationIdentifier
+        case "url": sortKey = .url
+        default: sortKey = .name
         }
+        sortAscending = sortDescriptor.ascending
+        fetchData()
     }
 }
 
@@ -429,6 +454,7 @@ extension PreferencesS3IconsViewController: NSTableViewDelegate {
         -> NSView?
     {
         guard let tableColumn = tableColumn else { return nil }
+        guard fetchedResults.indices.contains(row) else { return nil }
         let model = fetchedResults[row]
 
         let identifier = tableColumn.identifier
@@ -437,7 +463,7 @@ extension PreferencesS3IconsViewController: NSTableViewDelegate {
         textField.isBezeled = false
         textField.drawsBackground = false
         textField.isEditable = false
-        textField.isSelectable = false
+        textField.isSelectable = true
         textField.lineBreakMode = .byTruncatingTail
         cell.textField = textField
         cell.identifier = identifier

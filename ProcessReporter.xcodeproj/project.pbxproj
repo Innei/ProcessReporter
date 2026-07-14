@@ -10,6 +10,7 @@
 		1F1B2FF52DA3B3AB003F298D /* RxCocoa in Frameworks */ = {isa = PBXBuildFile; productRef = 1F1B2FF42DA3B3AB003F298D /* RxCocoa */; };
 		1F1B30112DA3CAAE003F298D /* Alamofire in Frameworks */ = {isa = PBXBuildFile; productRef = 1F1B30102DA3CAAE003F298D /* Alamofire */; };
 		1FD8C8D62DA27E59009F6BCB /* SnapKit in Frameworks */ = {isa = PBXBuildFile; productRef = 1FD8C8D52DA27E59009F6BCB /* SnapKit */; };
+		5A0000012F10000000000001 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 5A0000032F10000000000001 /* Sparkle */; };
 		DCD0000A2E0A100000000001 /* discord_game_sdk.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = DCD000092E0A100000000001 /* discord_game_sdk.dylib */; };
 		DCD0000B2E0A100000000001 /* discord_game_sdk.dylib in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = DCD000092E0A100000000001 /* discord_game_sdk.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 /* End PBXBuildFile section */
@@ -63,6 +64,7 @@
 				1F1B30112DA3CAAE003F298D /* Alamofire in Frameworks */,
 				1F1B2FF52DA3B3AB003F298D /* RxCocoa in Frameworks */,
 				1FD8C8D62DA27E59009F6BCB /* SnapKit in Frameworks */,
+				5A0000012F10000000000001 /* Sparkle in Frameworks */,
 				DCD0000A2E0A100000000001 /* discord_game_sdk.dylib in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -145,6 +147,7 @@
 				1FD8C8D52DA27E59009F6BCB /* SnapKit */,
 				1F1B2FF42DA3B3AB003F298D /* RxCocoa */,
 				1F1B30102DA3CAAE003F298D /* Alamofire */,
+				5A0000032F10000000000001 /* Sparkle */,
 			);
 			productName = ProcessReporter;
 			productReference = 1FD8C8BD2DA258F3009F6BCB /* ProcessReporter_DEV.app */;
@@ -178,6 +181,7 @@
 				1FD8C8D42DA27E59009F6BCB /* XCRemoteSwiftPackageReference "SnapKit" */,
 				1F1B2FF32DA3B3AB003F298D /* XCRemoteSwiftPackageReference "RxSwift" */,
 				1F1B300F2DA3CAAE003F298D /* XCRemoteSwiftPackageReference "Alamofire" */,
+				5A0000022F10000000000001 /* XCRemoteSwiftPackageReference "Sparkle" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 1FD8C8BE2DA258F3009F6BCB /* Products */;
@@ -334,14 +338,12 @@
 			buildSettings = {
 				ARCHS = "$(ARCHS_STANDARD)";
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = ProcessReporter/ProcessReporter.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 7VYQTBFBS5;
 				ENABLE_HARDENED_RUNTIME = YES;
-				EXCLUDED_ARCHS = x86_64;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
@@ -350,7 +352,7 @@
 				);
 				INFOPLIST_FILE = ProcessReporter/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
-				INFOPLIST_KEY_LSBackgroundOnly = YES;
+				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -370,6 +372,8 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.innei.ProcessReporterV2;
 				PRODUCT_NAME = "$(TARGET_NAME)_DEV";
+				SPARKLE_FEED_URL = "https://github.com/innei/ProcessReporter/releases/latest/download/appcast.xml";
+				SPARKLE_PUBLIC_ED_KEY = "";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "ProcessReporter/ProcessReporter-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
@@ -381,14 +385,12 @@
 			buildSettings = {
 				ARCHS = "$(ARCHS_STANDARD)";
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = ProcessReporter/ProcessReporter.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 7VYQTBFBS5;
 				ENABLE_HARDENED_RUNTIME = YES;
-				EXCLUDED_ARCHS = x86_64;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
 					"$(inherited)",
@@ -397,7 +399,7 @@
 				);
 				INFOPLIST_FILE = ProcessReporter/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
-				INFOPLIST_KEY_LSBackgroundOnly = YES;
+				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -417,6 +419,8 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.innei.ProcessReporterV2;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				SPARKLE_FEED_URL = "https://github.com/innei/ProcessReporter/releases/latest/download/appcast.xml";
+				SPARKLE_PUBLIC_ED_KEY = "";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "ProcessReporter/ProcessReporter-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
@@ -471,6 +475,14 @@
 				minimumVersion = 5.7.1;
 			};
 		};
+		5A0000022F10000000000001 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.9.4;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -488,6 +500,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 1FD8C8D42DA27E59009F6BCB /* XCRemoteSwiftPackageReference "SnapKit" */;
 			productName = SnapKit;
+		};
+		5A0000032F10000000000001 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 5A0000022F10000000000001 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

@@ -1,5 +1,5 @@
 import Cocoa
-import RxSwift
+@preconcurrency import RxSwift
 
 enum ReporterError: Error {
 	case networkError(String)
@@ -12,10 +12,20 @@ enum ReporterError: Error {
 
 enum SendError: Error {
 	case failure([String])
+	case persistenceFailure(message: String, successfulIntegrations: [String])
 }
 
 struct ReporterOptions {
-	let onSend: (_ data: ReportModel) async -> Result<Void, ReporterError>
+	let priority: Int
+	let onSend: @MainActor (_ data: ReportModel) async -> Result<Void, ReporterError>
+
+	init(
+		priority: Int = 100,
+		onSend: @escaping @MainActor (_ data: ReportModel) async -> Result<Void, ReporterError>
+	) {
+		self.priority = priority
+		self.onSend = onSend
+	}
 }
 
 @MainActor
@@ -26,18 +36,27 @@ class Reporter {
 	// Add reporter extensions array
 	private var reporterExtensions: [ReporterExtension] = []
 
-	private var cachedFilteredProcessAppNames = [String]()
-	private var cachedFilteredMediaAppNames = [String]()
-	private var disposers: [Disposable] = []
+	private var cachedFilteredProcessBundleIDs = Set<String>()
+	private var cachedFilteredMediaBundleIDs = Set<String>()
+	private var cachedFilteredMediaAppNames = Set<String>()
+	private let disposeBag = DisposeBag()
+	private var isMonitoring = false
+	private var isProcessMonitoring = false
+	private var isMediaMonitoring = false
+	private var preparationGeneration = 0
+	private var preparationTask: Task<Void, Never>?
+	private var pendingReport: ReportModel?
+	private var sendGeneration = 0
+	private var sendTask: Task<Void, Never>?
+	private var isSuspendedForSleep = false
 
 	// Mapping cache
 	private var mappingCache: [PreferencesDataModel.Mapping] = []
 
 	// Clear all caches for memory cleanup
 	public func clearCaches() {
-		cachedFilteredProcessAppNames.removeAll()
-		cachedFilteredMediaAppNames.removeAll()
-		mappingCache.removeAll()
+		refreshFilterCaches()
+		mappingCache = PreferencesDataModel.mappingList.value.getList()
 	}
 
 	// Handle wake from sleep - reinitialize components if needed
@@ -47,33 +66,64 @@ class Reporter {
 		// Clear caches that might be stale after sleep
 		clearCaches()
 
-		// Restart application monitoring if it was active
-		if PreferencesDataModel.shared.isEnabled.value {
-			ApplicationMonitor.shared.startMouseMonitoring()
-			ApplicationMonitor.shared.startWindowFocusMonitoring()
+		guard isSuspendedForSleep else { return }
+		isSuspendedForSleep = false
+		guard PreferencesDataModel.shared.isEnabled.value else { return }
+
+		// Recreate each source from the current preferences. Waiting is owned by
+		// AppDelegate, so no pre-sleep callback or missed Timer event can leak into
+		// the new monitoring session.
+		reporterInitializedTime = .now
+		monitor()
+		if !PreferencesDataModel.shared.enabledTypes.value.types.isEmpty {
+			setupTimer()
 		}
 
 		print("[Reporter] Wake from sleep handling completed")
 	}
 
+	public func handleSleep() {
+		guard !isSuspendedForSleep else { return }
+		isSuspendedForSleep = true
+		isMonitoring = false
+		isProcessMonitoring = false
+		isMediaMonitoring = false
+		ApplicationMonitor.shared.stopWindowFocusMonitoring()
+		ApplicationMonitor.shared.onWindowFocusChanged = nil
+		MediaInfoManager.stopMonitoringPlaybackChanges()
+		disposeTimer()
+		cancelPendingReportWork()
+		updateExtensions()
+	}
+
 	// Register a reporter extension
 	public func registerExtension(_ extension: ReporterExtension) {
 		reporterExtensions.append(`extension`)
-		if `extension`.isEnabled {
-			Task {
-				await `extension`.register(to: self)
-			}
+		if shouldActivateExtensions, `extension`.isEnabled {
+			`extension`.register(to: self)
 		}
 	}
 
 	// Update the status of all extensions
-	public func updateExtensions() async {
+	public func updateExtensions() {
 		for ext in reporterExtensions {
-			if ext.isEnabled {
-				await ext.register(to: self)
+			if shouldActivateExtensions, ext.isEnabled {
+				ext.register(to: self)
 			} else {
-				await ext.unregister(from: self)
+				ext.unregister(from: self)
 			}
+		}
+	}
+
+	private var shouldActivateExtensions: Bool {
+		isMonitoring && !isSuspendedForSleep
+			&& PreferencesDataModel.shared.isEnabled.value
+			&& !PreferencesDataModel.shared.enabledTypes.value.types.isEmpty
+	}
+
+	private func clearReportedState() {
+		for ext in reporterExtensions where ext.isEnabled {
+			ext.clearReportedState()
 		}
 	}
 
@@ -86,45 +136,57 @@ class Reporter {
 	}
 
 	public func send(data: ReportModel) async -> Result<[String], SendError> {
-		let results = await withTaskGroup(of: (String, Result<Void, ReporterError>).self) { group in
-			for (name, options) in mapping {
-				group.addTask {
-					let result = await options.onSend(data)
-					return (name, result)
-				}
-			}
-
-			var allResults = [(String, Result<Void, ReporterError>)]()
-			for await result in group {
-				allResults.append(result)
-			}
-			return allResults
-		}
-
+		let maximumReportAge: TimeInterval = 20
 		var successNames = [String]()
 		var failureNames = [String]()
+		var skippedNames = [String]()
 
-		let failures = results.filter { name, result in
+		// Snapshot the registry before awaiting. Integrations are intentionally run
+		// in sequence: ReportModel is a SwiftData reference type and is not safe to
+		// read concurrently from child tasks. The send queue coalesces newer reports
+		// so this does not create an unbounded backlog.
+		let registeredReporters = mapping.sorted { lhs, rhs in
+			if lhs.value.priority == rhs.value.priority {
+				return lhs.key < rhs.key
+			}
+			return lhs.value.priority < rhs.value.priority
+		}
+		for (name, options) in registeredReporters {
+			guard !Task.isCancelled, PreferencesDataModel.shared.isEnabled.value else {
+				break
+			}
+			guard Date().timeIntervalSince(data.timeStamp) <= maximumReportAge else {
+				NSLog("Dropping remaining integrations for a stale report older than 20 seconds")
+				break
+			}
+
+			let result = await options.onSend(data)
 			if case .success = result {
 				successNames.append(name)
-				return false
+				continue
 			}
 			if case let .failure(error) = result {
 				switch error {
 				case .ignored, .ratelimitExceeded:
-					successNames.append(name)
-					return false
+					skippedNames.append(name)
 				case .databaseError(let message):
 					failureNames.append(name)
 					NSLog("\(name) database error: \(message)")
-					return true
 				default:
 					failureNames.append(name)
 					NSLog("\(name) failed: \(error)")
-					return true
 				}
 			}
-			return true
+		}
+		guard !Task.isCancelled, PreferencesDataModel.shared.isEnabled.value else {
+			return .success(successNames)
+		}
+
+		// A skipped integration is not a successful delivery. The activity itself
+		// is still persisted below because History is a local activity log, not only
+		// a delivery log.
+		if !skippedNames.isEmpty {
+			NSLog("Report skipped by integrations: \(skippedNames.joined(separator: ", "))")
 		}
 
 		// Persist via DataStore (value-only, no SwiftData leakage)
@@ -139,20 +201,40 @@ class Reporter {
 			mediaProcessName: data.mediaProcessName,
 			mediaDuration: data.mediaDuration,
 			mediaElapsedTime: data.mediaElapsedTime,
-			mediaImageData: data.mediaImageData,
 			integrations: data.integrations
 		)
-		await DataStore.shared.saveReport(reportValue)
-		let isAllFailed = successNames.isEmpty && !failures.isEmpty
-		if !isAllFailed {
+		do {
+			try await DataStore.shared.saveReport(reportValue)
+		} catch {
+			NSLog("Failed to persist report history: \(error.localizedDescription)")
+			if PreferencesDataModel.shared.isEnabled.value {
+				if !successNames.isEmpty {
+					statusItemManager.updateLastSendProcessNameItem(data)
+				}
+				statusItemManager.toggleStatusItemIcon(successNames.isEmpty ? .error : .partialError)
+			}
+			return .failure(
+				.persistenceFailure(
+					message: error.localizedDescription,
+					successfulIntegrations: successNames
+				)
+			)
+		}
+
+		let isAllFailed = successNames.isEmpty && !failureNames.isEmpty
+		if !successNames.isEmpty, PreferencesDataModel.shared.isEnabled.value {
 			statusItemManager.updateLastSendProcessNameItem(data)
 		}
 
-		if failures.isEmpty {
-			statusItemManager.toggleStatusItemIcon(.syncing)
+		if failureNames.isEmpty {
+			if PreferencesDataModel.shared.isEnabled.value {
+				statusItemManager.toggleStatusItemIcon(.ready)
+			}
 			return .success(successNames)
 		} else {
-			statusItemManager.toggleStatusItemIcon(isAllFailed ? .error : .partialError)
+			if PreferencesDataModel.shared.isEnabled.value {
+				statusItemManager.toggleStatusItemIcon(isAllFailed ? .error : .partialError)
+			}
 			return .failure(.failure(failureNames))
 		}
 	}
@@ -191,8 +273,19 @@ class Reporter {
 			// Media process application identifier mapping
 			for rule in mappingCache where rule.type == .mediaProcessApplicationIdentifier {
 				if mediaInfo.applicationIdentifier == rule.from {
-					mediaInfo.processName = rule.to
-					data.mediaProcessName = rule.to
+					mediaInfo = MediaInfo(
+						name: mediaInfo.name,
+						artist: mediaInfo.artist,
+						album: mediaInfo.album,
+						image: mediaInfo.image,
+						duration: mediaInfo.duration,
+						elapsedTime: mediaInfo.elapsedTime,
+						processID: mediaInfo.processID,
+						processName: mediaInfo.processName,
+						executablePath: mediaInfo.executablePath,
+						playing: mediaInfo.playing,
+						applicationIdentifier: rule.to
+					)
 					break
 				}
 			}
@@ -211,65 +304,130 @@ class Reporter {
 	}
 
 	private func monitor() {
-		ApplicationMonitor.shared.startMouseMonitoring()
-		ApplicationMonitor.shared.startWindowFocusMonitoring()
-		ApplicationMonitor.shared.onWindowFocusChanged = { [weak self] info in
-			guard let self = self else { return }
-			if PreferencesDataModel.shared.focusReport.value
-				&& PreferencesDataModel.shared.enabledTypes.value.types.contains(.process)
-			{
-				self.prepareSend(windowInfo: info)
+		guard !isSuspendedForSleep else { return }
+		isMonitoring = true
+		configureMonitoringSources()
+		updateExtensions()
+	}
+
+	private func configureMonitoringSources() {
+		guard !isSuspendedForSleep, isMonitoring,
+			PreferencesDataModel.shared.isEnabled.value
+		else { return }
+		let enabledTypes = PreferencesDataModel.shared.enabledTypes.value.types
+
+		if enabledTypes.contains(.process) {
+			if !isProcessMonitoring {
+				isProcessMonitoring = true
+				ApplicationMonitor.shared.onWindowFocusChanged = { [weak self] info in
+					guard let self,
+						PreferencesDataModel.shared.isEnabled.value,
+						PreferencesDataModel.shared.focusReport.value,
+						PreferencesDataModel.shared.enabledTypes.value.types.contains(.process)
+					else { return }
+					self.prepareSend(windowInfo: info)
+				}
+				ApplicationMonitor.shared.startWindowFocusMonitoring()
 			}
+		} else if isProcessMonitoring {
+			isProcessMonitoring = false
+			ApplicationMonitor.shared.stopWindowFocusMonitoring()
+			ApplicationMonitor.shared.onWindowFocusChanged = nil
 		}
 
-		MediaInfoManager.startMonitoringPlaybackChanges { [weak self] mediaInfo in
-			guard let self = self else { return }
-			guard let mediaInfo else {
-				self.statusItemManager.updateCurrentMediaItem(nil)
-				return
+		if enabledTypes.contains(.media) {
+			if !isMediaMonitoring {
+				isMediaMonitoring = true
+				MediaInfoManager.startMonitoringPlaybackChanges { [weak self] mediaInfo in
+					guard let self,
+						PreferencesDataModel.shared.isEnabled.value,
+						PreferencesDataModel.shared.enabledTypes.value.types.contains(.media)
+					else { return }
+					guard let mediaInfo else {
+						self.statusItemManager.updateCurrentMediaItem(nil)
+						let processEnabled = PreferencesDataModel.shared.enabledTypes.value.types
+							.contains(.process)
+						if processEnabled {
+							self.prepareSend(
+								windowInfo: ApplicationMonitor.shared.getFocusedWindowInfo(),
+								resolveMissingMedia: false
+							)
+						} else {
+							self.clearReportedState()
+						}
+						return
+					}
+					self.statusItemManager.updateCurrentMediaItem(mediaInfo)
+					let windowInfo = PreferencesDataModel.shared.enabledTypes.value.types.contains(.process)
+						? ApplicationMonitor.shared.getFocusedWindowInfo() : nil
+					self.prepareSend(windowInfo: windowInfo, mediaInfo: mediaInfo)
+				}
 			}
-			if PreferencesDataModel.shared.enabledTypes.value.types.contains(.media) {
-				self.prepareSend(
-					windowInfo: ApplicationMonitor.shared.getFocusedWindowInfo(),
-					mediaInfo: mediaInfo
-				)
-			}
+		} else if isMediaMonitoring {
+			isMediaMonitoring = false
+			MediaInfoManager.stopMonitoringPlaybackChanges()
+			statusItemManager.updateCurrentMediaItem(nil)
 		}
-		statusItemManager.toggleStatusItemIcon(.syncing)
+
+		statusItemManager.toggleStatusItemIcon(enabledTypes.isEmpty ? .paused : .ready)
 	}
 
 	private var reporterInitializedTime: Date
 
 	private func prepareSend(
 		windowInfo optionalWindowInfo: FocusedWindowInfo?,
-		mediaInfo optionalMediaInfo: MediaInfo? = nil
+		mediaInfo optionalMediaInfo: MediaInfo? = nil,
+		resolveMissingMedia: Bool = true
 	) {
+		guard !isSuspendedForSleep, PreferencesDataModel.shared.isEnabled.value else { return }
+		let enabledTypes = PreferencesDataModel.shared.enabledTypes.value.types
+		guard !enabledTypes.isEmpty else { return }
+		let windowInfo = enabledTypes.contains(.process)
+			? (optionalWindowInfo ?? ApplicationMonitor.shared.getFocusedWindowInfo()) : nil
+		// A media snapshot remains valid without Accessibility permission or a
+		// readable focused window. Process-only sends still require a window.
+		guard enabledTypes.contains(.media) || windowInfo != nil else { return }
 
-		var windowInfo: FocusedWindowInfo!
-		if let optionalWindowInfo = optionalWindowInfo {
-			windowInfo = optionalWindowInfo
-		} else {
-			windowInfo = ApplicationMonitor.shared.getFocusedWindowInfo()
-			if windowInfo == nil {
-				return
-			}
+		preparationGeneration += 1
+		let generation = preparationGeneration
+		preparationTask?.cancel()
+
+		if let optionalMediaInfo, enabledTypes.contains(.media) {
+			preparationTask = nil
+			finishPreparingSend(
+				windowInfo: windowInfo,
+				mediaInfo: optionalMediaInfo,
+				generation: generation
+			)
+			return
+		}
+		if !enabledTypes.contains(.media) || !resolveMissingMedia {
+			preparationTask = nil
+			finishPreparingSend(windowInfo: windowInfo, mediaInfo: nil, generation: generation)
+			return
 		}
 
-		var mediaInfo: MediaInfo?
-		if let optionalMediaInfo = optionalMediaInfo {
-			mediaInfo = optionalMediaInfo
-		} else {
-			// Offload to background actor with timeout and coalescing
-			let semaphore = DispatchSemaphore(value: 0)
-			Task.detached(priority: .utility) {
-				let result = try? await MediaInfoManager.getMediaInfoAsync(timeout: 3.0)
-				mediaInfo = result ?? mediaInfo
-				semaphore.signal()
-			}
-			_ = semaphore.wait(timeout: .now() + .milliseconds(150))  // brief wait to reduce UI latency
+		preparationTask = Task { @MainActor [weak self] in
+			let mediaInfo = try? await MediaInfoManager.getMediaInfoAsync(timeout: 3.0)
+			guard let self, !Task.isCancelled else { return }
+			self.finishPreparingSend(
+				windowInfo: windowInfo,
+				mediaInfo: mediaInfo,
+				generation: generation
+			)
 		}
+	}
 
-		let appName = windowInfo.appName
+	private func finishPreparingSend(
+		windowInfo: FocusedWindowInfo?,
+		mediaInfo: MediaInfo?,
+		generation: Int
+	) {
+		guard generation == preparationGeneration,
+			PreferencesDataModel.shared.isEnabled.value
+		else { return }
+		preparationTask = nil
+
 		let now = Date()
 		// Ignore the first 2 seconds after initialization to wait for the setting synchronization to complete
 		if now.timeIntervalSince(reporterInitializedTime) < 2 {
@@ -283,7 +441,6 @@ class Reporter {
 		}
 		if !isNetworkAvailable() {
 			statusItemManager.toggleStatusItemIcon(.offline)
-			return
 		} else {
 			statusItemManager.toggleStatusItemIcon(.syncing)
 		}
@@ -297,16 +454,22 @@ class Reporter {
 
 		if enabledTypes.contains(.media), let mediaInfo = mediaInfo, mediaInfo.playing {
 			// Filter media name
+			let isFiltered: Bool
+			if let applicationIdentifier = mediaInfo.applicationIdentifier {
+				isFiltered = cachedFilteredMediaBundleIDs.contains(applicationIdentifier)
+			} else {
+				isFiltered = cachedFilteredMediaAppNames.contains(mediaInfo.processName)
+			}
 
-			if !cachedFilteredMediaAppNames.contains(mediaInfo.processName),
-				!shouldIgnoreArtistNull
-					|| (mediaInfo.artist != nil && !mediaInfo.artist!.isEmpty)
-			{
+			let hasArtist = !(mediaInfo.artist?.isEmpty ?? true)
+			if !isFiltered && (!shouldIgnoreArtistNull || hasArtist) {
 				dataModel.setMediaInfo(mediaInfo)
 			}
 		}
 		// Filter process name
-		if enabledTypes.contains(.process), !cachedFilteredProcessAppNames.contains(appName) {
+		if enabledTypes.contains(.process), let windowInfo,
+			!cachedFilteredProcessBundleIDs.contains(windowInfo.applicationIdentifier)
+		{
 			dataModel.setProcessInfo(windowInfo)
 		}
 		if let mediaInfo = mediaInfo, mediaInfo.playing {
@@ -316,22 +479,67 @@ class Reporter {
 		// Apply mapping rules to the data model before sending
 		applyMappingRules(to: &dataModel)
 
-		Task { @MainActor in
-			//            debugPrint(dataModel)
-			_ = await self.send(data: dataModel)
+		// Both sources may have been filtered. Do not send an empty payload to every
+		// integration or create an empty history row.
+		guard dataModel.processInfoRaw != nil || dataModel.mediaInfoRaw != nil else {
+			clearReportedState()
+			statusItemManager.toggleStatusItemIcon(.ready)
+			return
+		}
+
+		enqueueSend(dataModel)
+	}
+
+	private func enqueueSend(_ report: ReportModel) {
+		pendingReport = report
+		guard sendTask == nil else { return }
+
+		sendGeneration += 1
+		let generation = sendGeneration
+		sendTask = Task { @MainActor [weak self] in
+			guard let self else { return }
+			while !Task.isCancelled, PreferencesDataModel.shared.isEnabled.value,
+				let report = self.pendingReport
+			{
+				self.pendingReport = nil
+				_ = await self.send(data: report)
+			}
+
+			if self.sendGeneration == generation {
+				self.sendTask = nil
+			}
 		}
 	}
 
 	private func dispose() {
-		ApplicationMonitor.shared.stopMouseMonitoring()
+		isMonitoring = false
+		isProcessMonitoring = false
+		isMediaMonitoring = false
 		ApplicationMonitor.shared.stopWindowFocusMonitoring()
+		ApplicationMonitor.shared.onWindowFocusChanged = nil
+		MediaInfoManager.stopMonitoringPlaybackChanges()
+
+		cancelPendingReportWork()
+		updateExtensions()
 
 		statusItemManager.toggleStatusItemIcon(.paused)
+	}
+
+	private func cancelPendingReportWork() {
+		preparationGeneration += 1
+		preparationTask?.cancel()
+		preparationTask = nil
+		pendingReport = nil
+		sendGeneration += 1
+		sendTask?.cancel()
+		clearReportedState()
+		sendTask = nil
 	}
 
 	private var timer: Timer?
 	private func setupTimer() {
 		disposeTimer()
+		guard !isSuspendedForSleep else { return }
 
 		let interval = PreferencesDataModel.shared.sendInterval.value
 		timer = Timer.scheduledTimer(
@@ -339,16 +547,17 @@ class Reporter {
 		) { [weak self] _ in
 			Task { @MainActor in
 				guard let self = self else { return }
-				if let info = ApplicationMonitor.shared.getFocusedWindowInfo() {
-					self.prepareSend(windowInfo: info)
-				}
+				self.prepareSend(windowInfo: nil)
 			}
 		}
-		RunLoop.main.add(timer!, forMode: .common)
+		if let timer {
+			RunLoop.main.add(timer, forMode: .common)
+		}
 	}
 
 	private func disposeTimer() {
 		timer?.invalidate()
+		timer = nil
 	}
 
 	init() {
@@ -375,9 +584,8 @@ class Reporter {
 	}
 
 	deinit {
-		for disposer in disposers {
-			disposer.dispose()
-		}
+		preparationTask?.cancel()
+		sendTask?.cancel()
 	}
 }
 
@@ -389,28 +597,34 @@ extension Reporter {
 	}
 
 	private func subscribeMappingSettingsChanged() {
-		let disposer = PreferencesDataModel.mappingList.subscribe { [weak self] mappingList in
+		PreferencesDataModel.mappingList.subscribe { [weak self] mappingList in
 			self?.mappingCache = mappingList.getList()
-		}
-		disposers.append(disposer)
+		}.disposed(by: disposeBag)
 	}
 
 	private func subscribeFilterSettingsChanged() {
 		let d1 = PreferencesDataModel.filteredProcesses.subscribe { [weak self] appIds in
-			self?.cachedFilteredProcessAppNames.removeAll()
-			for appId in appIds {
-				let appInfo = AppUtility.shared.getAppInfo(for: appId)
-				self?.cachedFilteredProcessAppNames.append(appInfo.displayName)
-			}
+			self?.cachedFilteredProcessBundleIDs = Set(appIds)
 		}
 		let d2 = PreferencesDataModel.filteredMediaProcesses.subscribe { [weak self] appIds in
-			self?.cachedFilteredMediaAppNames.removeAll()
-			for appId in appIds {
-				let appInfo = AppUtility.shared.getAppInfo(for: appId)
-				self?.cachedFilteredMediaAppNames.append(appInfo.displayName)
-			}
+			guard let self else { return }
+			self.cachedFilteredMediaBundleIDs = Set(appIds)
+			self.cachedFilteredMediaAppNames = Set(
+				appIds.map { AppUtility.shared.getAppInfo(for: $0).displayName }
+			)
 		}
-		disposers.append(contentsOf: [d1, d2])
+		d1.disposed(by: disposeBag)
+		d2.disposed(by: disposeBag)
+	}
+
+	private func refreshFilterCaches() {
+		let processIDs = PreferencesDataModel.filteredProcesses.value
+		let mediaIDs = PreferencesDataModel.filteredMediaProcesses.value
+		cachedFilteredProcessBundleIDs = Set(processIDs)
+		cachedFilteredMediaBundleIDs = Set(mediaIDs)
+		cachedFilteredMediaAppNames = Set(
+			mediaIDs.map { AppUtility.shared.getAppInfo(for: $0).displayName }
+		)
 	}
 
 	private func subscribeGeneralSettingsChanged() {
@@ -420,21 +634,19 @@ extension Reporter {
 			guard let self = self else { return }
 			if enabled {
 				self.monitor()
+				if !preferences.enabledTypes.value.types.isEmpty {
+					self.setupTimer()
+					self.prepareSend(windowInfo: nil)
+				}
 			} else {
 				self.dispose()
 				self.disposeTimer()
 			}
 		}
 
-		if preferences.isEnabled.value {
-			if let info = ApplicationMonitor.shared.getFocusedWindowInfo() {
-				prepareSend(windowInfo: info)
-			}
-		}
-
 		let d2 = preferences.sendInterval.subscribe { [weak self] _ in
 			guard let self = self else { return }
-			if preferences.isEnabled.value {
+			if preferences.isEnabled.value, !preferences.enabledTypes.value.types.isEmpty {
 				self.setupTimer()
 			} else {
 				self.disposeTimer()
@@ -449,11 +661,24 @@ extension Reporter {
 			preferences.discordIntegration
 		).subscribe { [weak self] _ in
 			guard let self = self else { return }
-			Task {
-				await self.updateExtensions()
+			self.updateExtensions()
+		}
+
+		let d4 = preferences.enabledTypes.subscribe { [weak self] enabledTypes in
+			guard let self, preferences.isEnabled.value else { return }
+			self.cancelPendingReportWork()
+			self.configureMonitoringSources()
+			self.updateExtensions()
+			if enabledTypes.types.isEmpty {
+				self.disposeTimer()
+			} else {
+				self.setupTimer()
 			}
 		}
 
-		disposers.append(contentsOf: [d1, d2, d3])
+		d1.disposed(by: disposeBag)
+		d2.disposed(by: disposeBag)
+		d3.disposed(by: disposeBag)
+		d4.disposed(by: disposeBag)
 	}
 }

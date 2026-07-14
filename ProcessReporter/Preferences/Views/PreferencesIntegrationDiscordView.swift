@@ -8,8 +8,17 @@
 import AppKit
 import SnapKit
 
-class PreferencesIntegrationDiscordView: IntegrationView {
-    private var connectionStatusTimer: Timer?
+private final class DiscordConnectionStatusTimer: @unchecked Sendable {
+    var value: Timer?
+
+    deinit {
+        value?.invalidate()
+    }
+}
+
+@MainActor
+final class PreferencesIntegrationDiscordView: IntegrationView {
+    private let connectionStatusTimer = DiscordConnectionStatusTimer()
     private lazy var enabledCheckbox: NSButton = NSButton(
         checkboxWithTitle: "", target: nil, action: nil)
     private lazy var applicationIdTextField: NSScrollTextField = {
@@ -107,10 +116,6 @@ class PreferencesIntegrationDiscordView: IntegrationView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    deinit {
-        stopConnectionStatusTimer()
-    }
 
     override func setupUI() {
         super.setupUI()
@@ -224,6 +229,7 @@ class PreferencesIntegrationDiscordView: IntegrationView {
         var cfg = PreferencesDataModel.shared.discordIntegration.value
         cfg.isEnabled = enabledCheckbox.state == .on
         cfg.applicationId = applicationIdTextField.stringValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         cfg.showProcessInfo = processInfoCheckbox.state == .on
         cfg.showMediaInfo = mediaInfoCheckbox.state == .on
         cfg.prioritizeMedia = prioritizeMediaCheckbox.state == .on
@@ -234,7 +240,33 @@ class PreferencesIntegrationDiscordView: IntegrationView {
         cfg.brandSmallImageKey = brandSmallImageKeyTextField.stringValue
         cfg.enableButtons = enableButtonsCheckbox.state == .on
         cfg.buttonLabel = buttonLabelTextField.stringValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         cfg.buttonUrl = buttonUrlTextField.stringValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if cfg.isEnabled {
+            guard !cfg.applicationId.isEmpty,
+                  cfg.applicationId.allSatisfy(\.isNumber)
+            else {
+                ToastManager.shared.error("Discord Application ID must contain only digits")
+                return
+            }
+        }
+
+        if cfg.enableButtons {
+            guard !cfg.buttonLabel.isEmpty else {
+                ToastManager.shared.error("Discord button label is required")
+                return
+            }
+            guard let components = URLComponents(string: cfg.buttonUrl),
+                  let scheme = components.scheme?.lowercased(),
+                  ["http", "https"].contains(scheme),
+                  components.host != nil
+            else {
+                ToastManager.shared.error("Discord button URL must be a valid HTTP or HTTPS URL")
+                return
+            }
+        }
         PreferencesDataModel.shared.discordIntegration.accept(cfg)
         ToastManager.shared.success("Saved!")
 		DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
@@ -244,16 +276,16 @@ class PreferencesIntegrationDiscordView: IntegrationView {
     }
 
     private func startConnectionStatusTimer() {
-        connectionStatusTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) {
+        connectionStatusTimer.value = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) {
             [weak self] _ in
-            DispatchQueue.main.async {
+            Task { @MainActor [weak self] in
                 self?.updateConnectionStatus()
             }
         }
     }
 
     private func stopConnectionStatusTimer() {
-        connectionStatusTimer?.invalidate()
-        connectionStatusTimer = nil
+        connectionStatusTimer.value?.invalidate()
+        connectionStatusTimer.value = nil
     }
 }
