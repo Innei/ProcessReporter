@@ -21,11 +21,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.showSettings()
             }
         }
-        // Check for media-control installation after a short delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            MediaControlInstallationHelper.checkAndPromptInstallation()
-        }
-
         #if DEBUG
             showSettings()
         #endif

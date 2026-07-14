@@ -224,6 +224,10 @@ class Reporter {
 
 		MediaInfoManager.startMonitoringPlaybackChanges { [weak self] mediaInfo in
 			guard let self = self else { return }
+			guard let mediaInfo else {
+				self.statusItemManager.updateCurrentMediaItem(nil)
+				return
+			}
 			if PreferencesDataModel.shared.enabledTypes.value.types.contains(.media) {
 				self.prepareSend(
 					windowInfo: ApplicationMonitor.shared.getFocusedWindowInfo(),

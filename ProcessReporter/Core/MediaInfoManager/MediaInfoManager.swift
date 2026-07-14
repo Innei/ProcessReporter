@@ -8,12 +8,20 @@ import Foundation
 
 public class MediaInfoManager: NSObject {
   // Callback for when playback state changes
-  public typealias PlaybackStateChangedCallback = (MediaInfo) -> Void
+  public typealias PlaybackStateChangedCallback = (MediaInfo?) -> Void
 
-  // Media info provider based on macOS version
+  // Use JXA as the state authority on modern macOS. media-control remains an
+  // optional enrichment source when it is installed.
   private static var provider: MediaInfoProvider = {
     if #available(macOS 15.4, *) {
-      return CLIMediaInfoProvider()
+      let jxaProvider = JXAMediaInfoProvider()
+      guard CLIMediaInfoProvider.isMediaControlInstalled() else {
+        return jxaProvider
+      }
+      return AdaptiveMediaInfoProvider(
+        enrichmentProvider: CLIMediaInfoProvider(),
+        authoritativeProvider: jxaProvider
+      )
     } else {
       return LegacyMediaInfoProvider()
     }
@@ -25,7 +33,7 @@ public class MediaInfoManager: NSObject {
   // Store the callback
   private static var playbackStateChangedCallback: PlaybackStateChangedCallback?
   private static var playbackDebounceCancellable: AnyCancellable?
-  private static let playbackSubject = PassthroughSubject<MediaInfo, Never>()
+  private static let playbackSubject = PassthroughSubject<MediaInfo?, Never>()
 
   // Setup the notification observer
   public static func startMonitoringPlaybackChanges(
@@ -68,11 +76,6 @@ public class MediaInfoManager: NSObject {
     // Stop current monitoring
     provider.stopMonitoring()
 
-    // Reset failure counters if provider supports it
-    if let cliProvider = provider as? CLIMediaInfoProvider {
-      cliProvider.resetFailureCounter()
-    }
-
     // Small delay to ensure clean restart
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
       // Recreate debounced sink and restart provider
@@ -91,14 +94,12 @@ public class MediaInfoManager: NSObject {
   }
 
   public static func getMediaInfo() -> MediaInfo? {
-    // Avoid blocking the main thread with synchronous CLI calls
-    if Thread.isMainThread, provider is CLIMediaInfoProvider {
+    // All modern providers may spawn an external process. Never block the UI.
+    if Thread.isMainThread {
       return latestInfo
     }
     let info = provider.getMediaInfo()
-    if let info = info {
-      latestInfo = info
-    }
+    latestInfo = info
     return info
   }
 
@@ -107,9 +108,7 @@ public class MediaInfoManager: NSObject {
     -> MediaInfo?
   {
     let info = try await MediaInfoFetchActor.shared.requestInfo(using: provider, timeout: seconds)
-    if let info = info {
-      latestInfo = info
-    }
+    latestInfo = info
     return info
   }
 
@@ -174,10 +173,7 @@ actor MediaInfoFetchActor {
           return result
         } catch {
           group.cancelAll()
-          // On timeout/cancellation, try interrupting the CLI process if applicable
-          if let cli = provider as? CLIMediaInfoProvider {
-            cli.interruptCurrentExecProcess()
-          }
+          provider.cancelCurrentRequest()
           throw error
         }
       }

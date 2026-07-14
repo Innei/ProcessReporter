@@ -269,6 +269,8 @@ extension ReporterStatusItemManager: NSMenuDelegate {
 		_ = semaphore.wait(timeout: .now() + .milliseconds(150))
 		if let mediaInfo = mediaInfo ?? MediaInfoManager.getMediaInfo() {
 			updateCurrentMediaItem(mediaInfo)
+		} else {
+			updateCurrentMediaItem(nil)
 		}
 	}
 }

@@ -8,10 +8,17 @@ import Foundation
 protocol MediaInfoProvider {
   /// Start monitoring playback changes
   func startMonitoring(callback: @escaping MediaInfoManager.PlaybackStateChangedCallback)
-  
+
   /// Stop monitoring playback changes
   func stopMonitoring()
-  
+
   /// Get current media information
   func getMediaInfo() -> MediaInfo?
+
+  /// Cancel a currently running synchronous request, if supported.
+  func cancelCurrentRequest()
+}
+
+extension MediaInfoProvider {
+  func cancelCurrentRequest() {}
 }

@@ -110,8 +110,7 @@ class LegacyMediaInfoProvider: MediaInfoProvider {
       NotificationCenter.default.publisher(for: Notification.Name(name)).sink { _ in
         if let callback = self.callback {
           DispatchQueue.main.async {
-            guard let mediaInfo = self.getMediaInfo() else { return }
-            callback(mediaInfo)
+            callback(self.getMediaInfo())
           }
         }
       }.store(in: &cancellables)
