@@ -94,7 +94,7 @@ final class S3Uploader {
             throw S3UploaderError.invalidEndpoint(endpoint)
         }
 
-        if scheme == "http", !Self.isLoopbackHost(host) {
+        if scheme == "http", !isLoopbackHost(host) {
             throw S3UploaderError.insecureEndpoint(endpoint)
         }
 
@@ -106,11 +106,6 @@ final class S3Uploader {
             throw S3UploaderError.invalidEndpoint(endpoint)
         }
         return url
-    }
-
-    private static func isLoopbackHost(_ host: String) -> Bool {
-        let normalized = host.lowercased()
-        return normalized == "localhost" || normalized == "::1" || normalized.hasPrefix("127.")
     }
 
     private static func pathSegments(from rawPath: String) throws -> [String] {

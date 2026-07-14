@@ -20,6 +20,7 @@ final class PreferencesHistoryViewController: NSViewController, SettingWindowPro
 	private var searchField: NSSearchField!
 	private var observer: Any?
 	private var fetchTask: Task<Void, Never>?
+	private var searchDebounceTask: Task<Void, Never>?
 	private var fetchGeneration = 0
 
 	// 分页参数
@@ -218,6 +219,8 @@ final class PreferencesHistoryViewController: NSViewController, SettingWindowPro
 
 	private func cancelFetch() {
 		fetchGeneration += 1
+		searchDebounceTask?.cancel()
+		searchDebounceTask = nil
 		fetchTask?.cancel()
 		fetchTask = nil
 		isLoadingData = false
@@ -225,6 +228,8 @@ final class PreferencesHistoryViewController: NSViewController, SettingWindowPro
 
 	private func fetchData(isLoadingMore: Bool = false) {
 		guard !isLoadingMore || (!isLoadingData && hasMoreData) else { return }
+		searchDebounceTask?.cancel()
+		searchDebounceTask = nil
 
 		if !isLoadingMore {
 			hasMoreData = true
@@ -267,12 +272,20 @@ final class PreferencesHistoryViewController: NSViewController, SettingWindowPro
 		}
 	}
 
-	private func filterResultsWithSearchText(_ searchText: String) {
-		fetchData()
-	}
-
 	@objc private func searchTextChanged(_ sender: NSSearchField) {
-		filterResultsWithSearchText(sender.stringValue)
+		// Cancel the obsolete request immediately, then wait for a short pause in
+		// typing before entering the serialized database actor with the next query.
+		cancelFetch()
+		searchDebounceTask = Task { @MainActor [weak self] in
+			do {
+				try await Task.sleep(nanoseconds: 250_000_000)
+			} catch {
+				return
+			}
+			guard let self, !Task.isCancelled else { return }
+			self.searchDebounceTask = nil
+			self.fetchData()
+		}
 	}
 
 	@objc private func openDatabaseLocation() {

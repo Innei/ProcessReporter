@@ -20,6 +20,7 @@ final class PreferencesIntegrationS3View: IntegrationView {
   private lazy var endpointInput: NSScrollTextField = .init()
   private lazy var pathInput: NSScrollTextField = .init()
   private lazy var customDomainInput: NSScrollTextField = .init()
+  private var displayedIntegration = S3Integration()
 
   private lazy var testButton: NSButton = {
     let button = NSButton(
@@ -56,6 +57,13 @@ final class PreferencesIntegrationS3View: IntegrationView {
 
     setupGridView()
     synchronizeUI()
+    bindToCredentialReadiness(
+      controls: [
+        enabledButton, bucketInput, regionInput, accessKeyInput, secretKeyInput,
+        endpointInput, pathInput, customDomainInput, testButton, resetButton, saveButton,
+      ],
+      onReady: { [weak self] in self?.synchronizeUI() }
+    )
   }
 
   @available(*, unavailable)
@@ -66,6 +74,7 @@ final class PreferencesIntegrationS3View: IntegrationView {
   public func synchronizeUI() {
     // Synchronize UI with data model
     let integration = PreferencesDataModel.s3Integration.value
+    displayedIntegration = integration
     enabledButton.state = integration.isEnabled ? .on : .off
     bucketInput.stringValue = integration.bucket
     regionInput.stringValue = integration.region
@@ -81,18 +90,72 @@ final class PreferencesIntegrationS3View: IntegrationView {
   }
 
   @objc private func save() {
-    guard let integration = integrationFromForm(requireCompleteConfiguration: false) else { return }
-    let previousIntegration = PreferencesDataModel.s3Integration.value
-    guard integration.persistCredentialChanges(comparedTo: previousIntegration) else {
-      ToastManager.shared.error("Could not update the S3 credentials in Keychain")
-      return
+    let formBaseline = displayedIntegration
+    guard let requestedIntegration = integrationFromForm(
+      baseline: formBaseline,
+      requireCompleteConfiguration: false
+    ) else { return }
+    saveButton.isEnabled = false
+    SettingsMutationCoordinator.shared.enqueue { [self] in
+      let previousIntegration = PreferencesDataModel.s3Integration.value
+      var integration = previousIntegration
+      if requestedIntegration.isEnabled != formBaseline.isEnabled {
+        integration.isEnabled = requestedIntegration.isEnabled
+      }
+      if requestedIntegration.bucket != formBaseline.bucket {
+        integration.bucket = requestedIntegration.bucket
+      }
+      if requestedIntegration.region != formBaseline.region {
+        integration.region = requestedIntegration.region
+      }
+      if requestedIntegration.accessKey != formBaseline.accessKey {
+        integration.accessKey = requestedIntegration.accessKey
+      }
+      if requestedIntegration.secretKey != formBaseline.secretKey {
+        integration.secretKey = requestedIntegration.secretKey
+      }
+      if requestedIntegration.endpoint != formBaseline.endpoint {
+        integration.endpoint = requestedIntegration.endpoint
+      }
+      if requestedIntegration.path != formBaseline.path {
+        integration.path = requestedIntegration.path
+      }
+      if requestedIntegration.customDomain != formBaseline.customDomain {
+        integration.customDomain = requestedIntegration.customDomain
+      }
+      guard self.validate(integration, requireCompleteConfiguration: false) else {
+        self.saveButton.isEnabled = true
+        return
+      }
+      let persistenceResult = await integration.persistCredentialChanges(
+        comparedTo: previousIntegration)
+      self.saveButton.isEnabled = true
+      guard persistenceResult.succeeded else {
+        ToastManager.shared.error("Could not update the S3 credentials in Keychain")
+        return
+      }
+      PreferencesDataModel.s3Integration.accept(integration)
+      self.synchronizeUI()
+      var warnings: [String] = []
+      if persistenceResult.retainedClearedKeychainValue {
+        warnings.append("an inaccessible Keychain copy may remain")
+      }
+      if persistenceResult.usedLocalFallback {
+        warnings.append("new credentials were saved locally because Keychain was unavailable")
+      }
+      if warnings.isEmpty {
+        ToastManager.shared.success("Saved!")
+      } else {
+        ToastManager.shared.warning("Saved, but " + warnings.joined(separator: "; "))
+      }
     }
-    PreferencesDataModel.s3Integration.accept(integration)
-    ToastManager.shared.success("Saved!")
   }
 
   @objc private func testUpload() {
-    guard let integration = integrationFromForm(requireCompleteConfiguration: true) else { return }
+    guard let integration = integrationFromForm(
+      baseline: PreferencesDataModel.s3Integration.value,
+      requireCompleteConfiguration: true
+    ) else { return }
 
     // Create app picker view
     AppPickerView.showAppPicker(for: testButton) { appId, appURL in
@@ -122,8 +185,11 @@ final class PreferencesIntegrationS3View: IntegrationView {
     }
   }
 
-  private func integrationFromForm(requireCompleteConfiguration: Bool) -> S3Integration? {
-    var integration = PreferencesDataModel.s3Integration.value
+  private func integrationFromForm(
+    baseline: S3Integration,
+    requireCompleteConfiguration: Bool
+  ) -> S3Integration? {
+    var integration = baseline
     integration.isEnabled = enabledButton.state == .on
     integration.bucket = bucketInput.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
     integration.region = regionInput.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -137,13 +203,24 @@ final class PreferencesIntegrationS3View: IntegrationView {
       .trimmingCharacters(in: .whitespacesAndNewlines)
       .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
 
+    guard validate(
+      integration,
+      requireCompleteConfiguration: requireCompleteConfiguration
+    ) else { return nil }
+    return integration
+  }
+
+  private func validate(
+    _ integration: S3Integration,
+    requireCompleteConfiguration: Bool
+  ) -> Bool {
     let requiresCredentials = requireCompleteConfiguration || integration.isEnabled
     if requiresCredentials,
        [integration.bucket, integration.region, integration.accessKey, integration.secretKey]
        .contains(where: \.isEmpty)
     {
       ToastManager.shared.error("Bucket, region, access key, and secret key are required")
-      return nil
+      return false
     }
 
     for (label, value) in [("endpoint", integration.endpoint), ("custom domain", integration.customDomain)]
@@ -155,21 +232,16 @@ final class PreferencesIntegrationS3View: IntegrationView {
             let host = components.host
       else {
         ToastManager.shared.error("The S3 \(label) must be a valid HTTP or HTTPS URL")
-        return nil
+        return false
       }
       if label == "endpoint", scheme != "https", !isLoopbackHost(host) {
         ToastManager.shared.error(
           "The S3 \(label) must use HTTPS; HTTP is allowed only for localhost")
-        return nil
+        return false
       }
     }
 
-    return integration
-  }
-
-  private func isLoopbackHost(_ host: String) -> Bool {
-    let normalized = host.lowercased()
-    return normalized == "localhost" || normalized == "::1" || normalized.hasPrefix("127.")
+    return true
   }
 
   private func setupGridView() {

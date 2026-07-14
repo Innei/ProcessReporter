@@ -9,6 +9,8 @@ permissions:
   contents: write
 
 concurrency:
+  # Keep retries for one tag serialized without allowing another tag to replace
+  # a pending release run. The verified promotion step converges global latest.
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
@@ -458,6 +460,9 @@ jobs:
             --wait
           xcrun stapler staple "$DMG_PATH"
           xcrun stapler validate "$DMG_PATH"
+          hdiutil verify "$DMG_PATH"
+          spctl --assess --type open --context context:primary-signature \
+            --verbose=2 "$DMG_PATH"
 
       - name: Generate and verify Sparkle appcast
         env:
@@ -486,17 +491,16 @@ jobs:
           test -n "$GENERATE_KEYS"
           mkdir -p "$UPDATES_PATH"
           cp "$DIST_PATH/$DMG_NAME" "$UPDATES_PATH/$DMG_NAME"
-          if [[ "$DISTRIBUTION_MODE" == "adhoc" ]]; then
-            {
+          {
+            echo "<!-- processreporter-workflow-run: ${GITHUB_RUN_ID} -->"
+            if [[ "$DISTRIBUTION_MODE" == "adhoc" ]]; then
               echo "<!-- processreporter-signing-mode: ad-hoc -->"
               echo "> [!WARNING]"
-              echo "> This build is ad-hoc signed and is not notarized by Apple. macOS may require explicit approval on first launch. Because ad-hoc identity is not stable across builds, an update may also require Accessibility permission to be granted again and integration credentials to be re-entered. Sparkle update archives remain protected by the repository's EdDSA key."
+              echo "> This build is ad-hoc signed and is not notarized by Apple. macOS may require explicit approval on first launch. Because ad-hoc identity is not stable across builds, an update may also require Accessibility permission to be granted again. Integration credentials remain in a permissions-restricted local credential journal until a stable Developer ID build can migrate them to Keychain. Sparkle update archives remain protected by the repository's EdDSA key."
               echo
-              cat "$NOTES_FILE"
-            } > "$UPDATES_PATH/$NOTES_NAME"
-          else
-            cp "$NOTES_FILE" "$UPDATES_PATH/$NOTES_NAME"
-          fi
+            fi
+            cat "$NOTES_FILE"
+          } > "$UPDATES_PATH/$NOTES_NAME"
 
           printf '%s' "$SPARKLE_PRIVATE_KEY" > "$PRIVATE_KEY_PATH"
           chmod 600 "$PRIVATE_KEY_PATH"
@@ -530,6 +534,7 @@ jobs:
           )
 
       - name: Publish GitHub Release atomically from draft
+        id: publish
         env:
           TAG: ${{ steps.metadata.outputs.tag }}
           VERSION: ${{ steps.metadata.outputs.version }}
@@ -538,56 +543,80 @@ jobs:
         run: |
           set -euo pipefail
           DMG_PATH="$DIST_PATH/ProcessReporter-v${VERSION}.dmg"
-          SIGNED_NOTES_PATH="$DIST_PATH/ProcessReporter-v${VERSION}.md"
+          NOTES_PATH="$DIST_PATH/ProcessReporter-v${VERSION}.md"
+          RELEASE_BODY_PATH="$RUNNER_TEMP/processreporter-release-body.md"
+          MANIFEST_SHA256="$(shasum -a 256 "$DIST_PATH/SHA256SUMS.txt" | awk '{print $1}')"
+          {
+            cat "$NOTES_PATH"
+            echo
+            echo "<!-- processreporter-manifest-sha256: ${MANIFEST_SHA256} -->"
+          } > "$RELEASE_BODY_PATH"
           ASSETS=(
             "$DMG_PATH"
             "$DIST_PATH/appcast.xml"
-            "$SIGNED_NOTES_PATH"
+            "$NOTES_PATH"
             "$DIST_PATH/SHA256SUMS.txt"
           )
+          REUSED_PUBLIC_RELEASE=false
 
           if gh release view "$TAG" >/dev/null 2>&1; then
-            RELEASE_STATE="$(gh release view "$TAG" --json isDraft,isPrerelease)"
+            RELEASE_STATE="$(gh release view "$TAG" --json body,isDraft,isPrerelease)"
             IS_DRAFT="$(jq -r .isDraft <<< "$RELEASE_STATE")"
             IS_PRERELEASE="$(jq -r .isPrerelease <<< "$RELEASE_STATE")"
             if [[ "$IS_DRAFT" != "true" ]]; then
-              echo "A public release already exists for $TAG; refusing to replace it." >&2
-              exit 1
-            fi
-            if [[ "$IS_PRERELEASE" != "false" ]]; then
-              echo "Existing draft is marked as a prerelease; refusing to promote it." >&2
-              exit 1
-            fi
+              [[ "$IS_PRERELEASE" == "false" ]]
+              jq -r .body <<< "$RELEASE_STATE" | \
+                grep -F "<!-- processreporter-workflow-run: ${GITHUB_RUN_ID} -->" >/dev/null
+              REUSED_PUBLIC_RELEASE=true
+              echo "Public release from this workflow run already exists; verification will resume."
+            else
+              if [[ "$IS_PRERELEASE" != "false" ]]; then
+                echo "Existing draft is marked as a prerelease; refusing to promote it." >&2
+                exit 1
+              fi
 
-            # A failed prior attempt may have left stale draft assets. Remove the
-            # complete hidden asset set before re-uploading so unrelated bytes can
-            # never become public when the draft is promoted.
-            EXISTING_ASSETS="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
-            while IFS= read -r EXISTING_ASSET; do
-              [[ -z "$EXISTING_ASSET" ]] || \
-                gh release delete-asset "$TAG" "$EXISTING_ASSET" --yes
-            done <<< "$EXISTING_ASSETS"
+              # A failed prior attempt may have left stale draft assets. Remove the
+              # complete hidden asset set before re-uploading so unrelated bytes can
+              # never become public when the draft is promoted.
+              EXISTING_ASSETS="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
+              while IFS= read -r EXISTING_ASSET; do
+                [[ -z "$EXISTING_ASSET" ]] || \
+                  gh release delete-asset "$TAG" "$EXISTING_ASSET" --yes
+              done <<< "$EXISTING_ASSETS"
 
-            gh release upload "$TAG" "${ASSETS[@]}"
-            gh release edit "$TAG" --title "ProcessReporter $TAG" --notes-file "$SIGNED_NOTES_PATH"
+              gh release upload "$TAG" "${ASSETS[@]}"
+              gh release edit "$TAG" \
+                --title "ProcessReporter $TAG" \
+                --notes-file "$RELEASE_BODY_PATH"
+            fi
           else
             gh release create "$TAG" "${ASSETS[@]}" \
               --verify-tag \
               --draft \
               --title "ProcessReporter $TAG" \
-              --notes-file "$SIGNED_NOTES_PATH"
+              --notes-file "$RELEASE_BODY_PATH"
           fi
 
-          PREPUBLIC_STATE="$(gh release view "$TAG" --json isDraft,isPrerelease)"
-          [[ "$(jq -r .isDraft <<< "$PREPUBLIC_STATE")" == "true" ]]
-          [[ "$(jq -r .isPrerelease <<< "$PREPUBLIC_STATE")" == "false" ]]
-          gh release edit "$TAG" --draft=false --latest
+          if [[ "$REUSED_PUBLIC_RELEASE" == "false" ]]; then
+            PREPUBLIC_STATE="$(gh release view "$TAG" --json databaseId,isDraft,isPrerelease)"
+            [[ "$(jq -r .isDraft <<< "$PREPUBLIC_STATE")" == "true" ]]
+            [[ "$(jq -r .isPrerelease <<< "$PREPUBLIC_STATE")" == "false" ]]
+            RELEASE_ID="$(jq -r .databaseId <<< "$PREPUBLIC_STATE")"
+            [[ "$RELEASE_ID" =~ ^[0-9]+$ ]]
+            gh api --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+              -F draft=false \
+              -f make_latest=false >/dev/null
+          fi
+          echo "reused_public=$REUSED_PUBLIC_RELEASE" >> "$GITHUB_OUTPUT"
 
       - name: Verify published release and feed
         env:
           TAG: ${{ steps.metadata.outputs.tag }}
           VERSION: ${{ steps.metadata.outputs.version }}
+          BUILD_NUMBER: ${{ steps.metadata.outputs.build }}
           DISTRIBUTION_MODE: ${{ steps.distribution.outputs.mode }}
+          REUSED_PUBLIC_RELEASE: ${{ steps.publish.outputs.reused_public }}
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
@@ -597,6 +626,8 @@ jobs:
           [[ "$(jq -r .isPrerelease <<< "$RELEASE_JSON")" == "false" ]]
           [[ "$(jq -r .tagName <<< "$RELEASE_JSON")" == "$TAG" ]]
           [[ "$(jq '.assets | length' <<< "$RELEASE_JSON")" == "4" ]]
+          jq -r .body <<< "$RELEASE_JSON" | \
+            grep -F "<!-- processreporter-workflow-run: ${GITHUB_RUN_ID} -->" >/dev/null
           if [[ "$DISTRIBUTION_MODE" == "adhoc" ]]; then
             jq -r .body <<< "$RELEASE_JSON" | \
               grep -F "<!-- processreporter-signing-mode: ad-hoc -->" >/dev/null
@@ -613,15 +644,163 @@ jobs:
           done
 
           echo "Published release: $(jq -r .url <<< "$RELEASE_JSON")"
-          FEED_PATH="$RUNNER_TEMP/published-appcast.xml"
-          curl --fail --silent --show-error --location \
-            --retry 6 --retry-all-errors --retry-delay 5 \
-            "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/appcast.xml" \
-            --output "$FEED_PATH"
-          PUBLISHED_VERSION="$(xmllint --xpath 'string((//*[local-name()="shortVersionString"])[1])' "$FEED_PATH")"
+          PUBLISHED_DIR="$RUNNER_TEMP/published-release"
+          DOWNLOAD_SUCCEEDED=false
+          for ATTEMPT in {1..6}; do
+            rm -rf "$PUBLISHED_DIR"
+            mkdir -p "$PUBLISHED_DIR"
+            if gh release download "$TAG" --dir "$PUBLISHED_DIR"; then
+              DOWNLOAD_SUCCEEDED=true
+              break
+            fi
+            [[ "$ATTEMPT" == "6" ]] || sleep 5
+          done
+          [[ "$DOWNLOAD_SUCCEEDED" == "true" ]]
+          (
+            cd "$PUBLISHED_DIR"
+            shasum -a 256 -c SHA256SUMS.txt
+          )
+          PUBLISHED_MANIFEST_SHA256="$(shasum -a 256 \
+            "$PUBLISHED_DIR/SHA256SUMS.txt" | awk '{print $1}')"
+          jq -r .body <<< "$RELEASE_JSON" | \
+            grep -F "<!-- processreporter-manifest-sha256: ${PUBLISHED_MANIFEST_SHA256} -->" >/dev/null
+          for ASSET_NAME in \
+            "ProcessReporter-v${VERSION}.dmg" \
+            appcast.xml \
+            "ProcessReporter-v${VERSION}.md" \
+            SHA256SUMS.txt
+          do
+            if [[ "$REUSED_PUBLIC_RELEASE" != "true" ]]; then
+              cmp "$PUBLISHED_DIR/$ASSET_NAME" "$DIST_PATH/$ASSET_NAME"
+            fi
+          done
+          hdiutil verify "$PUBLISHED_DIR/ProcessReporter-v${VERSION}.dmg"
+          if [[ "$DISTRIBUTION_MODE" == "developer-id" ]]; then
+            spctl --assess --type open --context context:primary-signature \
+              --verbose=2 "$PUBLISHED_DIR/ProcessReporter-v${VERSION}.dmg"
+          fi
+
+          PUBLISHED_APPCAST="$PUBLISHED_DIR/appcast.xml"
+          PUBLISHED_BUILD="$(xmllint --xpath \
+            'string((//*[local-name()="version"])[1])' "$PUBLISHED_APPCAST")"
+          PUBLISHED_VERSION="$(xmllint --xpath \
+            'string((//*[local-name()="shortVersionString"])[1])' "$PUBLISHED_APPCAST")"
+          [[ "$PUBLISHED_BUILD" == "$BUILD_NUMBER" ]]
           [[ "$PUBLISHED_VERSION" == "$VERSION" ]]
-          grep -F "/releases/download/${TAG}/ProcessReporter-v${VERSION}.dmg" "$FEED_PATH" >/dev/null
-          grep -F "sparkle:edSignature=" "$FEED_PATH" >/dev/null
+          grep -F "/releases/download/${TAG}/ProcessReporter-v${VERSION}.dmg" \
+            "$PUBLISHED_APPCAST" >/dev/null
+          grep -F "/releases/download/${TAG}/ProcessReporter-v${VERSION}.md" \
+            "$PUBLISHED_APPCAST" >/dev/null
+          grep -F "sparkle:edSignature=" "$PUBLISHED_APPCAST" >/dev/null
+
+          semver_greater_than() {
+            local left_major left_minor left_patch
+            local right_major right_minor right_patch
+            IFS=. read -r left_major left_minor left_patch <<< "$1"
+            IFS=. read -r right_major right_minor right_patch <<< "$2"
+            (( left_major > right_major )) && return 0
+            (( left_major < right_major )) && return 1
+            (( left_minor > right_minor )) && return 0
+            (( left_minor < right_minor )) && return 1
+            (( left_patch > right_patch ))
+          }
+
+          load_max_public_release() {
+            local public_releases candidate_tag candidate_id candidate_version
+            local current_release_seen=false
+            if ! public_releases="$(gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq '.[] | select(.draft == false and .prerelease == false) | [.tag_name, (.id | tostring)] | @tsv')"
+            then
+              return 1
+            fi
+
+            MAX_PUBLIC_TAG=""
+            MAX_PUBLIC_RELEASE_ID=""
+            while IFS=$'\t' read -r candidate_tag candidate_id; do
+              [[ "$candidate_tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || continue
+              [[ "$candidate_id" =~ ^[0-9]+$ ]] || continue
+              [[ "$candidate_tag" == "$TAG" ]] && current_release_seen=true
+              candidate_version="${candidate_tag#v}"
+              if [[ -z "$MAX_PUBLIC_TAG" ]] || \
+                semver_greater_than "$candidate_version" "${MAX_PUBLIC_TAG#v}"
+              then
+                MAX_PUBLIC_TAG="$candidate_tag"
+                MAX_PUBLIC_RELEASE_ID="$candidate_id"
+              fi
+            done <<< "$public_releases"
+
+            [[ "$current_release_seen" == "true" && \
+              -n "$MAX_PUBLIC_TAG" && -n "$MAX_PUBLIC_RELEASE_ID" ]]
+          }
+
+          # Per-tag jobs may overlap. Recompute after each promotion so a slower
+          # older release cannot overwrite a newer release that completed first.
+          LATEST_CONVERGED=false
+          FINAL_LATEST_TAG=""
+          for ATTEMPT in {1..6}; do
+            if load_max_public_release; then
+              TARGET_LATEST_RELEASE_ID="$MAX_PUBLIC_RELEASE_ID"
+              if gh api --method PATCH \
+                "repos/${GITHUB_REPOSITORY}/releases/${TARGET_LATEST_RELEASE_ID}" \
+                -f make_latest=true >/dev/null \
+                && load_max_public_release
+              then
+                OBSERVED_MAX_TAG="$MAX_PUBLIC_TAG"
+                if ACTUAL_LATEST_TAG="$(gh api \
+                  "repos/${GITHUB_REPOSITORY}/releases/latest" \
+                  --jq '.tag_name')" \
+                  && [[ "$ACTUAL_LATEST_TAG" == "$OBSERVED_MAX_TAG" ]]
+                then
+                  FINAL_LATEST_TAG="$ACTUAL_LATEST_TAG"
+                  LATEST_CONVERGED=true
+                  break
+                fi
+              fi
+            fi
+            [[ "$ATTEMPT" == "6" ]] || sleep 5
+          done
+          [[ "$LATEST_CONVERGED" == "true" ]]
+
+          SKIP_CURRENT_APPCAST=false
+          if [[ "$FINAL_LATEST_TAG" == "$TAG" ]]; then
+            FEED_PATH="$RUNNER_TEMP/published-appcast.xml"
+            LATEST_FEED_MATCHED=false
+            for ATTEMPT in {1..6}; do
+              if OBSERVED_LATEST_TAG="$(gh api \
+                "repos/${GITHUB_REPOSITORY}/releases/latest" \
+                --jq '.tag_name')" \
+                && [[ "$OBSERVED_LATEST_TAG" != "$TAG" ]] \
+                && [[ "$OBSERVED_LATEST_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
+                && semver_greater_than "${OBSERVED_LATEST_TAG#v}" "$VERSION"
+              then
+                FINAL_LATEST_TAG="$OBSERVED_LATEST_TAG"
+                SKIP_CURRENT_APPCAST=true
+                break
+              fi
+              if curl --fail --silent --show-error --location \
+                --retry 2 --retry-all-errors --retry-delay 2 \
+                "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/appcast.xml" \
+                --output "$FEED_PATH" \
+                && cmp -s "$FEED_PATH" "$PUBLISHED_DIR/appcast.xml"
+              then
+                LATEST_FEED_MATCHED=true
+                break
+              fi
+              [[ "$ATTEMPT" == "6" ]] || sleep 5
+            done
+            [[ "$SKIP_CURRENT_APPCAST" == "true" || \
+              "$LATEST_FEED_MATCHED" == "true" ]]
+          else
+            semver_greater_than "${FINAL_LATEST_TAG#v}" "$VERSION"
+            SKIP_CURRENT_APPCAST=true
+          fi
+
+          if [[ "$SKIP_CURRENT_APPCAST" == "true" ]]; then
+            echo "A higher public release, $FINAL_LATEST_TAG, is latest; skipping current-tag appcast comparison."
+            echo "Latest remains $FINAL_LATEST_TAG; skipped appcast comparison for $TAG." \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Remove temporary signing material
         if: always()

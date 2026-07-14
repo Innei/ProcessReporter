@@ -15,15 +15,11 @@ final class PreferencesFilterViewController: NSViewController, SettingWindowProt
 
     private var preferencesHostingController: PreferencesHostingController?
     override func loadView() {
-        super.loadView()
+        view = NSView(frame: NSRect(origin: .zero, size: frameSize))
         let hostingController = PreferencesHostingController()
         preferencesHostingController = hostingController
         view.addSubview(hostingController.view)
         addChild(hostingController)
-        view.snp.makeConstraints { make in
-            make.height.equalTo(frameSize.height)
-            make.width.equalTo(frameSize.width)
-        }
         hostingController.view.snp.makeConstraints { make in
             make.edges.equalToSuperview()
         }

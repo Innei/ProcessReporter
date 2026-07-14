@@ -14,6 +14,7 @@ private let statusExpirationOptions = [30, 60, 120, 300]
 
 @MainActor
 final class PreferencesIntegrationSlackView: IntegrationView {
+    private var displayedIntegration = SlackIntegration()
     private lazy var enabledButton: NSButton = {
         let button = NSButton(
             checkboxWithTitle: "", target: nil, action: nil
@@ -101,6 +102,15 @@ final class PreferencesIntegrationSlackView: IntegrationView {
 
         setupUI()
         synchronizeUI()
+        bindToCredentialReadiness(
+            controls: [
+                enabledButton, apiKeyInput, globalCustomEmojiInput,
+                statusTextTemplateStringInput, statusExpirationDropdown,
+                defaultEmojiInput, defaultStatusTextInput, conditionEmojiButton,
+                resetButton, saveButton,
+            ],
+            onReady: { [weak self] in self?.synchronizeUI() }
+        )
     }
 
     override func setupUI() {
@@ -236,6 +246,7 @@ final class PreferencesIntegrationSlackView: IntegrationView {
     public func synchronizeUI() {
         // Synchronize UI with data model
         let integration = PreferencesDataModel.shared.slackIntegration.value
+        displayedIntegration = integration
         enabledButton.state = integration.isEnabled ? .on : .off
         globalCustomEmojiInput.stringValue = integration.globalCustomEmoji
         statusTextTemplateStringInput.stringValue = integration.statusTextTemplateString
@@ -251,30 +262,73 @@ final class PreferencesIntegrationSlackView: IntegrationView {
     }
 
     @objc private func save() {
-        let previousIntegration = PreferencesDataModel.shared.slackIntegration.value
-        var integration = previousIntegration
-        integration.isEnabled = enabledButton.state == .on
-        integration.globalCustomEmoji = globalCustomEmojiInput.stringValue
-        integration.statusTextTemplateString = statusTextTemplateStringInput.stringValue
+        let formBaseline = displayedIntegration
+        let requestedIsEnabled = enabledButton.state == .on
+        let requestedGlobalCustomEmoji = globalCustomEmojiInput.stringValue
+        let requestedStatusTemplate = statusTextTemplateStringInput.stringValue
         guard statusExpirationOptions.indices.contains(statusExpirationDropdown.indexOfSelectedItem)
         else {
             ToastManager.shared.error("Select a valid status expiration")
             return
         }
-        integration.expiration = statusExpirationOptions[statusExpirationDropdown.indexOfSelectedItem]
-        integration.defaultEmoji = defaultEmojiInput.stringValue
-        integration.defaultStatusText = defaultStatusTextInput.stringValue
-        integration.apiToken = apiKeyInput.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if integration.isEnabled && integration.apiToken.isEmpty {
+        let requestedExpiration = statusExpirationOptions[statusExpirationDropdown.indexOfSelectedItem]
+        let requestedDefaultEmoji = defaultEmojiInput.stringValue
+        let requestedDefaultStatusText = defaultStatusTextInput.stringValue
+        let requestedAPIToken = apiKeyInput.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if requestedIsEnabled && requestedAPIToken.isEmpty {
             ToastManager.shared.error("Slack API token is required when the integration is enabled")
             return
         }
-        guard integration.persistCredentialChanges(comparedTo: previousIntegration) else {
-            ToastManager.shared.error("Could not update the Slack API token in Keychain")
-            return
+        saveButton.isEnabled = false
+        SettingsMutationCoordinator.shared.enqueue { [self] in
+            let previousIntegration = PreferencesDataModel.shared.slackIntegration.value
+            var integration = previousIntegration
+            if requestedIsEnabled != formBaseline.isEnabled {
+                integration.isEnabled = requestedIsEnabled
+            }
+            if requestedGlobalCustomEmoji != formBaseline.globalCustomEmoji {
+                integration.globalCustomEmoji = requestedGlobalCustomEmoji
+            }
+            if requestedStatusTemplate != formBaseline.statusTextTemplateString {
+                integration.statusTextTemplateString = requestedStatusTemplate
+            }
+            if requestedExpiration != formBaseline.expiration {
+                integration.expiration = requestedExpiration
+            }
+            if requestedDefaultEmoji != formBaseline.defaultEmoji {
+                integration.defaultEmoji = requestedDefaultEmoji
+            }
+            if requestedDefaultStatusText != formBaseline.defaultStatusText {
+                integration.defaultStatusText = requestedDefaultStatusText
+            }
+            if requestedAPIToken != formBaseline.apiToken {
+                integration.apiToken = requestedAPIToken
+            }
+            guard !integration.isEnabled || !integration.apiToken.isEmpty else {
+                self.saveButton.isEnabled = true
+                ToastManager.shared.error(
+                    "Slack API token is required when the integration is enabled")
+                return
+            }
+            let persistenceResult = await integration.persistCredentialChanges(
+                comparedTo: previousIntegration)
+            self.saveButton.isEnabled = true
+            guard persistenceResult.succeeded else {
+                ToastManager.shared.error("Could not update the Slack API token in Keychain")
+                return
+            }
+            PreferencesDataModel.shared.slackIntegration.accept(integration)
+            self.synchronizeUI()
+            if persistenceResult.retainedClearedKeychainValue {
+                ToastManager.shared.warning(
+                    "Saved, but an inaccessible Keychain copy may remain")
+            } else if persistenceResult.usedLocalFallback {
+                ToastManager.shared.warning(
+                    "Saved locally because Keychain was unavailable")
+            } else {
+                ToastManager.shared.success("Saved!")
+            }
         }
-        PreferencesDataModel.shared.slackIntegration.accept(integration)
-        ToastManager.shared.success("Saved!")
     }
 
     @objc private func openConditionEmojiModal() {

@@ -377,18 +377,31 @@ extension PreferencesIntegrationSlackView.EmojiConditionViewController {
 
 		snapshotCurrentConditions()
 
-		// 更新到 Preferences 中
-		let previousIntegration = PreferencesDataModel.shared.slackIntegration.value
-		var integration = previousIntegration
-		integration.customEmojiConditionList = EmojiConditionList(conditions: conditions)
-		guard integration.persistCredentialChanges(comparedTo: previousIntegration) else {
-			ToastManager.shared.error("Could not verify the Slack API token in Keychain")
-			return
-		}
-		PreferencesDataModel.shared.slackIntegration.accept(integration)
+		let requestedConditionList = EmojiConditionList(conditions: conditions)
+		saveButton.isEnabled = false
+		SettingsMutationCoordinator.shared.enqueue { [self] in
+			let previousIntegration = PreferencesDataModel.shared.slackIntegration.value
+			var integration = previousIntegration
+			integration.customEmojiConditionList = requestedConditionList
+			let persistenceResult = await integration.persistCredentialChanges(
+				comparedTo: previousIntegration)
+			self.saveButton.isEnabled = true
+			guard persistenceResult.succeeded else {
+				ToastManager.shared.error("Could not verify the Slack API token in Keychain")
+				return
+			}
+			PreferencesDataModel.shared.slackIntegration.accept(integration)
+			if persistenceResult.retainedClearedKeychainValue {
+				ToastManager.shared.warning(
+					"Saved, but an inaccessible Keychain copy may remain")
+			} else if persistenceResult.usedLocalFallback {
+				ToastManager.shared.warning(
+					"Saved locally because Keychain was unavailable")
+			}
 
-		// 关闭窗口
-		dismiss(nil)
+			// 关闭窗口
+			self.dismiss(nil)
+		}
 	}
 
 	@objc func addCondition() {

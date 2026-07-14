@@ -10,31 +10,28 @@ import SnapKit
 
 @MainActor
 final class SettingWindow: NSWindow {
-	private lazy var generalVC = PreferencesGeneralViewController()
+	private static let contentSize = NSSize(width: 900, height: 500)
 
 	private let rootViewController = NSViewController()
 
-	private lazy var defaultFrameSize: NSSize = generalVC.frameSize
-
 	// UserDefaults keys for window position and size
 	private let windowFrameKey = "SettingWindowFrame"
-	private var pendingTabSwitch: DispatchWorkItem?
 
 	convenience init() {
 		self.init(
-			contentRect: .zero, styleMask: [.titled, .closable, .miniaturizable],
+			contentRect: NSRect(origin: .zero, size: Self.contentSize),
+			styleMask: [.titled, .closable, .miniaturizable],
 			backing: .buffered, defer: false)
+		rootViewController.view.frame = NSRect(origin: .zero, size: Self.contentSize)
+		rootViewController.preferredContentSize = Self.contentSize
 		contentViewController = rootViewController
 
-		rootViewController.view.frame.size = generalVC.frameSize
-		self.isReleasedWhenClosed = false
+		isReleasedWhenClosed = false
 		title = "Settings"
-
-		positionWindow()
-
 		delegate = self
 
 		loadView()
+		positionWindow()
 		switchToTab(.general)
 	}
 
@@ -68,18 +65,12 @@ final class SettingWindow: NSWindow {
 //        }
 #if DEBUG
 		if let visibleFrame = NSScreen.main?.visibleFrame {
-			setFrame(
-				.init(
-					origin: .init(
-						x: visibleFrame.minX + 20,
-						y: visibleFrame.midY - defaultFrameSize.height / 2),
-					size: defaultFrameSize),
-				display: true)
-		} else {
-			setFrame(.init(origin: .zero, size: defaultFrameSize), display: true)
+			setFrameOrigin(.init(
+				x: visibleFrame.minX + 20,
+				y: visibleFrame.midY - frame.height / 2
+			))
 		}
 #else
-		setFrame(.init(origin: .zero, size: defaultFrameSize), display: true)
 		centerWindowOnScreen()
 #endif
 	}
@@ -138,16 +129,6 @@ final class SettingWindow: NSWindow {
 		case .mapping:
 			vcType = PreferencesMappingViewController.self
 		}
-		let cancelledPendingSwitch = pendingTabSwitch != nil
-		pendingTabSwitch?.cancel()
-		pendingTabSwitch = nil
-		if cancelledPendingSwitch {
-			for child in rootViewController.children {
-				child.view.layer?.removeAnimation(forKey: "fadeOut")
-				child.view.alphaValue = 1
-			}
-		}
-
 		if currentViewController?.isKind(of: vcType.classForCoder()) == true {
 			toolbar?.selectedItemIdentifier = NSToolbarItem.Identifier(rawValue: tab.rawValue)
 			return
@@ -155,58 +136,18 @@ final class SettingWindow: NSWindow {
 
 		let vc = vcType.init()
 
-		// 为当前视图创建淡出动画
 		for child in rootViewController.children {
-			let fadeOutAnimation = CASpringAnimation(keyPath: "opacity")
-			fadeOutAnimation.fromValue = 1.0
-			fadeOutAnimation.toValue = 0.0
-			fadeOutAnimation.duration = 0.2
-			fadeOutAnimation.damping = 12
-			fadeOutAnimation.initialVelocity = 5
-			fadeOutAnimation.isRemovedOnCompletion = true
-
-			child.view.layer?.add(fadeOutAnimation, forKey: "fadeOut")
+			child.view.removeFromSuperview()
+			child.removeFromParent()
 		}
 
-		// 延迟一小段时间后切换视图
-		let workItem = DispatchWorkItem { [weak self] in
-			guard let self = self else { return }
-			self.pendingTabSwitch = nil
-
-			// Remove existing view controllers
-			for child in self.rootViewController.children {
-				child.view.removeFromSuperview()
-				child.removeFromParent()
-			}
-
-			// 准备新视图
-			vc.view.alphaValue = 0
-			self.rootViewController.addChild(vc)
-			self.rootViewController.view.addSubview(vc.view)
-			vc.view.snp.makeConstraints { make in
-				make.edges.equalToSuperview()
-			}
-
-			// 为新视图创建淡入动画
-			let fadeInAnimation = CASpringAnimation(keyPath: "opacity")
-			fadeInAnimation.fromValue = 0.0
-			fadeInAnimation.toValue = 1.0
-			fadeInAnimation.duration = 0.2
-			fadeInAnimation.damping = 12
-			fadeInAnimation.initialVelocity = 5
-			fadeInAnimation.isRemovedOnCompletion = true
-
-			vc.view.layer?.add(fadeInAnimation, forKey: "fadeIn")
-			vc.view.alphaValue = 1
-
-			self.toolbar?.selectedItemIdentifier = NSToolbarItem.Identifier(rawValue: tab.rawValue)
-
-			let targetSize = (vc as? SettingWindowProtocol)?.frameSize ?? self.defaultFrameSize
-
-			self.adjustFrameForNewContentSize(targetSize)
+		rootViewController.addChild(vc)
+		rootViewController.view.addSubview(vc.view)
+		vc.view.snp.makeConstraints { make in
+			make.edges.equalToSuperview()
 		}
-		pendingTabSwitch = workItem
-		DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: workItem)
+
+		toolbar?.selectedItemIdentifier = NSToolbarItem.Identifier(rawValue: tab.rawValue)
 	}
 
 	enum TabIdentifier: String {
@@ -224,38 +165,6 @@ final class SettingWindow: NSWindow {
 	//        UserDefaults.standard.set(frameData, forKey: windowFrameKey)
 	//    }
 
-	func adjustFrameForNewContentSize(_ contentSize: NSSize) {
-		NSAnimationContext.runAnimationGroup(
-			{ context in
-				context.allowsImplicitAnimation = true
-				context.duration = 0.25
-				context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-
-				let newWindowSize = frameRect(
-					forContentRect: CGRect(origin: .zero, size: contentSize)
-				).size
-				var frame = self.frame
-
-				guard let screen = screen ?? NSScreen.main else { return }
-				let screenFrame = screen.visibleFrame
-
-				// 计算新的窗口位置
-				let newHeight = newWindowSize.height
-
-				// 默认向下调整（保持窗口顶部位置不变）
-				frame.origin.y = frame.origin.y + (frame.height - newHeight)
-
-				frame.size = newWindowSize
-				frame.origin.y = max(
-					screenFrame.minY,
-					min(frame.origin.y, screenFrame.maxY - min(frame.height, screenFrame.height)))
-				frame.origin.x = max(
-					screenFrame.minX,
-					min(frame.origin.x, screenFrame.maxX - min(frame.width, screenFrame.width)))
-
-				animator().setFrame(frame, display: true)
-			}, completionHandler: nil)
-	}
 }
 
 extension NSToolbarItem.Identifier {

@@ -45,11 +45,6 @@ private let descriptionDictionary: [String: String] = [
     "Capture One": "调色",
 ]
 
-private func isLoopbackHost(_ host: String) -> Bool {
-    let normalized = host.lowercased()
-    return normalized == "localhost" || normalized == "::1" || normalized.hasPrefix("127.")
-}
-
 @MainActor
 private func sendMixSpaceRequest(data: ReportModel) async -> Result<Void, ReporterError> {
     let config = PreferencesDataModel.shared.mixSpaceIntegration.value

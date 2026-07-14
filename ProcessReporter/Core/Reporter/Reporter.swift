@@ -68,7 +68,7 @@ class Reporter {
 
 		guard isSuspendedForSleep else { return }
 		isSuspendedForSleep = false
-		guard PreferencesDataModel.shared.isEnabled.value else { return }
+		guard PreferencesDataModel.shared.reportingAllowed else { return }
 
 		// Recreate each source from the current preferences. Waiting is owned by
 		// AppDelegate, so no pre-sleep callback or missed Timer event can leak into
@@ -117,7 +117,7 @@ class Reporter {
 
 	private var shouldActivateExtensions: Bool {
 		isMonitoring && !isSuspendedForSleep
-			&& PreferencesDataModel.shared.isEnabled.value
+			&& PreferencesDataModel.shared.reportingAllowed
 			&& !PreferencesDataModel.shared.enabledTypes.value.types.isEmpty
 	}
 
@@ -136,7 +136,6 @@ class Reporter {
 	}
 
 	public func send(data: ReportModel) async -> Result<[String], SendError> {
-		let maximumReportAge: TimeInterval = 20
 		var successNames = [String]()
 		var failureNames = [String]()
 		var skippedNames = [String]()
@@ -152,11 +151,7 @@ class Reporter {
 			return lhs.value.priority < rhs.value.priority
 		}
 		for (name, options) in registeredReporters {
-			guard !Task.isCancelled, PreferencesDataModel.shared.isEnabled.value else {
-				break
-			}
-			guard Date().timeIntervalSince(data.timeStamp) <= maximumReportAge else {
-				NSLog("Dropping remaining integrations for a stale report older than 20 seconds")
+			guard !Task.isCancelled, PreferencesDataModel.shared.reportingAllowed else {
 				break
 			}
 
@@ -178,7 +173,7 @@ class Reporter {
 				}
 			}
 		}
-		guard !Task.isCancelled, PreferencesDataModel.shared.isEnabled.value else {
+			guard !Task.isCancelled, PreferencesDataModel.shared.reportingAllowed else {
 			return .success(successNames)
 		}
 
@@ -207,7 +202,7 @@ class Reporter {
 			try await DataStore.shared.saveReport(reportValue)
 		} catch {
 			NSLog("Failed to persist report history: \(error.localizedDescription)")
-			if PreferencesDataModel.shared.isEnabled.value {
+			if PreferencesDataModel.shared.reportingAllowed {
 				if !successNames.isEmpty {
 					statusItemManager.updateLastSendProcessNameItem(data)
 				}
@@ -222,17 +217,17 @@ class Reporter {
 		}
 
 		let isAllFailed = successNames.isEmpty && !failureNames.isEmpty
-		if !successNames.isEmpty, PreferencesDataModel.shared.isEnabled.value {
+		if !successNames.isEmpty, PreferencesDataModel.shared.reportingAllowed {
 			statusItemManager.updateLastSendProcessNameItem(data)
 		}
 
 		if failureNames.isEmpty {
-			if PreferencesDataModel.shared.isEnabled.value {
+			if PreferencesDataModel.shared.reportingAllowed {
 				statusItemManager.toggleStatusItemIcon(.ready)
 			}
 			return .success(successNames)
 		} else {
-			if PreferencesDataModel.shared.isEnabled.value {
+			if PreferencesDataModel.shared.reportingAllowed {
 				statusItemManager.toggleStatusItemIcon(isAllFailed ? .error : .partialError)
 			}
 			return .failure(.failure(failureNames))
@@ -312,7 +307,7 @@ class Reporter {
 
 	private func configureMonitoringSources() {
 		guard !isSuspendedForSleep, isMonitoring,
-			PreferencesDataModel.shared.isEnabled.value
+			PreferencesDataModel.shared.reportingAllowed
 		else { return }
 		let enabledTypes = PreferencesDataModel.shared.enabledTypes.value.types
 
@@ -321,7 +316,7 @@ class Reporter {
 				isProcessMonitoring = true
 				ApplicationMonitor.shared.onWindowFocusChanged = { [weak self] info in
 					guard let self,
-						PreferencesDataModel.shared.isEnabled.value,
+						PreferencesDataModel.shared.reportingAllowed,
 						PreferencesDataModel.shared.focusReport.value,
 						PreferencesDataModel.shared.enabledTypes.value.types.contains(.process)
 					else { return }
@@ -340,7 +335,7 @@ class Reporter {
 				isMediaMonitoring = true
 				MediaInfoManager.startMonitoringPlaybackChanges { [weak self] mediaInfo in
 					guard let self,
-						PreferencesDataModel.shared.isEnabled.value,
+						PreferencesDataModel.shared.reportingAllowed,
 						PreferencesDataModel.shared.enabledTypes.value.types.contains(.media)
 					else { return }
 					guard let mediaInfo else {
@@ -379,7 +374,7 @@ class Reporter {
 		mediaInfo optionalMediaInfo: MediaInfo? = nil,
 		resolveMissingMedia: Bool = true
 	) {
-		guard !isSuspendedForSleep, PreferencesDataModel.shared.isEnabled.value else { return }
+		guard !isSuspendedForSleep, PreferencesDataModel.shared.reportingAllowed else { return }
 		let enabledTypes = PreferencesDataModel.shared.enabledTypes.value.types
 		guard !enabledTypes.isEmpty else { return }
 		let windowInfo = enabledTypes.contains(.process)
@@ -424,7 +419,7 @@ class Reporter {
 		generation: Int
 	) {
 		guard generation == preparationGeneration,
-			PreferencesDataModel.shared.isEnabled.value
+			PreferencesDataModel.shared.reportingAllowed
 		else { return }
 		preparationTask = nil
 
@@ -498,7 +493,7 @@ class Reporter {
 		let generation = sendGeneration
 		sendTask = Task { @MainActor [weak self] in
 			guard let self else { return }
-			while !Task.isCancelled, PreferencesDataModel.shared.isEnabled.value,
+			while !Task.isCancelled, PreferencesDataModel.shared.reportingAllowed,
 				let report = self.pendingReport
 			{
 				self.pendingReport = nil
@@ -632,7 +627,7 @@ extension Reporter {
 
 		let d1 = preferences.isEnabled.subscribe { [weak self] enabled in
 			guard let self = self else { return }
-			if enabled {
+			if enabled, preferences.reportingAllowed {
 				self.monitor()
 				if !preferences.enabledTypes.value.types.isEmpty {
 					self.setupTimer()
@@ -646,7 +641,7 @@ extension Reporter {
 
 		let d2 = preferences.sendInterval.subscribe { [weak self] _ in
 			guard let self = self else { return }
-			if preferences.isEnabled.value, !preferences.enabledTypes.value.types.isEmpty {
+			if preferences.reportingAllowed, !preferences.enabledTypes.value.types.isEmpty {
 				self.setupTimer()
 			} else {
 				self.disposeTimer()
@@ -665,7 +660,7 @@ extension Reporter {
 		}
 
 		let d4 = preferences.enabledTypes.subscribe { [weak self] enabledTypes in
-			guard let self, preferences.isEnabled.value else { return }
+			guard let self, preferences.reportingAllowed else { return }
 			self.cancelPendingReportWork()
 			self.configureMonitoringSources()
 			self.updateExtensions()

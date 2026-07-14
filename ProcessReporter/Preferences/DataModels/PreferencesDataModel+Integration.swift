@@ -152,33 +152,27 @@ extension MixSpaceIntegration {
 	}
 
 	static func fromStorable(_ value: Any?) -> MixSpaceIntegration? {
-		var integration = decodeIntegrationFromUserDefaults(value, as: Self.self) ?? .init()
-		if !integration.apiToken.isEmpty {
-			if CredentialStore.store(
-				integration.apiToken,
-				for: IntegrationCredentialAccount.mixSpaceToken
-			) {
-				var sanitized = integration
-				sanitized.apiToken = ""
-				if let storedValue = encodeIntegrationForUserDefaults(sanitized) {
-					UserDefaults.standard.set(storedValue, forKey: "mixSpaceIntegration")
-				}
-			}
-		} else {
-			integration.apiToken = CredentialStore.value(
-				for: IntegrationCredentialAccount.mixSpaceToken
-			) ?? ""
-		}
-		return integration
+		decodeIntegrationFromUserDefaults(value, as: Self.self) ?? .init()
 	}
 
-	func persistCredentialChanges(comparedTo previous: Self) -> Bool {
-		CredentialStore.apply([
+	func persistCredentialChanges(
+		comparedTo previous: Self
+	) async -> CredentialStore.ApplyResult {
+		var storedConfiguration = self
+		storedConfiguration.apiToken = ""
+		guard let storedValue = encodeIntegrationForUserDefaults(
+			storedConfiguration
+		) as? String else {
+			return .failed
+		}
+		return await CredentialStore.apply([
 			.init(
 				account: IntegrationCredentialAccount.mixSpaceToken,
 				previousValue: previous.apiToken,
 				newValue: apiToken
 			)
+		], pendingPreferences: [
+			.init(key: "mixSpaceIntegration", value: storedValue),
 		])
 	}
 
@@ -237,33 +231,27 @@ extension SlackIntegration {
 	}
 
 	static func fromStorable(_ value: Any?) -> SlackIntegration? {
-		var integration = decodeIntegrationFromUserDefaults(value, as: Self.self) ?? .init()
-		if !integration.apiToken.isEmpty {
-			if CredentialStore.store(
-				integration.apiToken,
-				for: IntegrationCredentialAccount.slackToken
-			) {
-				var sanitized = integration
-				sanitized.apiToken = ""
-				if let storedValue = encodeIntegrationForUserDefaults(sanitized) {
-					UserDefaults.standard.set(storedValue, forKey: "slackIntegration")
-				}
-			}
-		} else {
-			integration.apiToken = CredentialStore.value(
-				for: IntegrationCredentialAccount.slackToken
-			) ?? ""
-		}
-		return integration
+		decodeIntegrationFromUserDefaults(value, as: Self.self) ?? .init()
 	}
 
-	func persistCredentialChanges(comparedTo previous: Self) -> Bool {
-		CredentialStore.apply([
+	func persistCredentialChanges(
+		comparedTo previous: Self
+	) async -> CredentialStore.ApplyResult {
+		var storedConfiguration = self
+		storedConfiguration.apiToken = ""
+		guard let storedValue = encodeIntegrationForUserDefaults(
+			storedConfiguration
+		) as? String else {
+			return .failed
+		}
+		return await CredentialStore.apply([
 			.init(
 				account: IntegrationCredentialAccount.slackToken,
 				previousValue: previous.apiToken,
 				newValue: apiToken
 			)
+		], pendingPreferences: [
+			.init(key: "slackIntegration", value: storedValue),
 		])
 	}
 
@@ -316,46 +304,21 @@ extension S3Integration {
 	}
 
 	static func fromStorable(_ value: Any?) -> S3Integration? {
-		var integration = decodeIntegrationFromUserDefaults(value, as: Self.self) ?? .init()
-		var migratedStorage = integration
-		var didMigrateCredential = false
-		if !integration.accessKey.isEmpty {
-			if CredentialStore.store(
-				integration.accessKey,
-				for: IntegrationCredentialAccount.s3AccessKey
-			) {
-				migratedStorage.accessKey = ""
-				didMigrateCredential = true
-			}
-		} else {
-			integration.accessKey = CredentialStore.value(
-				for: IntegrationCredentialAccount.s3AccessKey
-			) ?? ""
-		}
-
-		if !integration.secretKey.isEmpty {
-			if CredentialStore.store(
-				integration.secretKey,
-				for: IntegrationCredentialAccount.s3SecretKey
-			) {
-				migratedStorage.secretKey = ""
-				didMigrateCredential = true
-			}
-		} else {
-			integration.secretKey = CredentialStore.value(
-				for: IntegrationCredentialAccount.s3SecretKey
-			) ?? ""
-		}
-		if didMigrateCredential,
-		   let storedValue = encodeIntegrationForUserDefaults(migratedStorage)
-		{
-			UserDefaults.standard.set(storedValue, forKey: "s3Integration")
-		}
-		return integration
+		decodeIntegrationFromUserDefaults(value, as: Self.self) ?? .init()
 	}
 
-	func persistCredentialChanges(comparedTo previous: Self) -> Bool {
-		CredentialStore.apply([
+	func persistCredentialChanges(
+		comparedTo previous: Self
+	) async -> CredentialStore.ApplyResult {
+		var storedConfiguration = self
+		storedConfiguration.accessKey = ""
+		storedConfiguration.secretKey = ""
+		guard let storedValue = encodeIntegrationForUserDefaults(
+			storedConfiguration
+		) as? String else {
+			return .failed
+		}
+		return await CredentialStore.apply([
 			.init(
 				account: IntegrationCredentialAccount.s3AccessKey,
 				previousValue: previous.accessKey,
@@ -366,6 +329,8 @@ extension S3Integration {
 				previousValue: previous.secretKey,
 				newValue: secretKey
 			),
+		], pendingPreferences: [
+			.init(key: "s3Integration", value: storedValue),
 		])
 	}
 
@@ -380,6 +345,221 @@ extension S3Integration {
 extension PreferencesDataModel {
     @UserDefaultsRelay("s3Integration", defaultValue: S3Integration())
     static var s3Integration: BehaviorRelay<S3Integration>
+
+    static let integrationCredentialsReady = BehaviorRelay<Bool>(value: false)
+    static private(set) var integrationCredentialRecoveryWarning: String?
+    static private(set) var integrationCredentialStoreUnavailable = false
+
+    /// The credential journal is an authority boundary, not only a UI warning.
+    /// Keep every Reporter entry point fail-closed even if a caller writes to the
+    /// persisted `isEnabled` relay while the journal is unavailable.
+    static var reportingAllowed: Bool {
+        isEnabled.value && !integrationCredentialStoreUnavailable
+    }
+
+    /// Applies a user- or import-requested reporting state without allowing an
+    /// unreadable credential authority to be bypassed.
+    @discardableResult
+    static func setReportingEnabled(_ requestedValue: Bool) -> Bool {
+        guard !requestedValue || !integrationCredentialStoreUnavailable else {
+            isEnabled.accept(false)
+            return false
+        }
+        isEnabled.accept(requestedValue)
+        return true
+    }
+
+    /// Loads Keychain-backed credentials before the Reporter subscribes to the
+    /// integration relays. Security framework calls run on CredentialStore's
+    /// serial queue, while relay updates remain isolated to the main actor.
+    static func hydrateIntegrationCredentials() async {
+        defer { integrationCredentialsReady.accept(true) }
+        integrationCredentialRecoveryWarning = nil
+        integrationCredentialStoreUnavailable = false
+
+        let currentMixSpace = mixSpaceIntegration.value
+        let currentSlack = slackIntegration.value
+        let currentS3 = s3Integration.value
+
+        let mixSpaceResolution = await CredentialStore.resolve(
+            currentMixSpace.apiToken,
+            for: IntegrationCredentialAccount.mixSpaceToken
+        )
+        guard !Task.isCancelled else { return }
+        let slackResolution = await CredentialStore.resolve(
+            currentSlack.apiToken,
+            for: IntegrationCredentialAccount.slackToken
+        )
+        guard !Task.isCancelled else { return }
+        let s3AccessKeyResolution = await CredentialStore.resolve(
+            currentS3.accessKey,
+            for: IntegrationCredentialAccount.s3AccessKey
+        )
+        guard !Task.isCancelled else { return }
+        let s3SecretKeyResolution = await CredentialStore.resolve(
+            currentS3.secretKey,
+            for: IntegrationCredentialAccount.s3SecretKey
+        )
+        guard !Task.isCancelled else { return }
+
+        // Keychain work is intentionally performed off the main actor. Merge each
+        // resolved credential only when that field still has the value captured
+        // before the await. This preserves newer UI edits without discarding
+        // unrelated metadata changes made while hydration was in flight.
+        let latestMixSpace = mixSpaceIntegration.value
+        if latestMixSpace.apiToken == currentMixSpace.apiToken {
+            if mixSpaceResolution.runtimeValue != latestMixSpace.apiToken {
+                var mergedMixSpace = latestMixSpace
+                mergedMixSpace.apiToken = mixSpaceResolution.runtimeValue
+                mixSpaceIntegration.accept(mergedMixSpace)
+            }
+            if mixSpaceResolution.persistedValue != currentMixSpace.apiToken {
+                var persistedMixSpace = mixSpaceIntegration.value
+                persistedMixSpace.apiToken = mixSpaceResolution.persistedValue
+                if let storedValue = encodeIntegrationForUserDefaults(persistedMixSpace) {
+                    UserDefaults.standard.set(storedValue, forKey: "mixSpaceIntegration")
+                }
+            }
+        }
+
+        let latestSlack = slackIntegration.value
+        if latestSlack.apiToken == currentSlack.apiToken {
+            if slackResolution.runtimeValue != latestSlack.apiToken {
+                var mergedSlack = latestSlack
+                mergedSlack.apiToken = slackResolution.runtimeValue
+                slackIntegration.accept(mergedSlack)
+            }
+            if slackResolution.persistedValue != currentSlack.apiToken {
+                var persistedSlack = slackIntegration.value
+                persistedSlack.apiToken = slackResolution.persistedValue
+                if let storedValue = encodeIntegrationForUserDefaults(persistedSlack) {
+                    UserDefaults.standard.set(storedValue, forKey: "slackIntegration")
+                }
+            }
+        }
+
+        let latestS3 = s3Integration.value
+        let canMergeAccessKey = latestS3.accessKey == currentS3.accessKey
+        let canMergeSecretKey = latestS3.secretKey == currentS3.secretKey
+        var mergedS3 = latestS3
+        if canMergeAccessKey {
+            mergedS3.accessKey = s3AccessKeyResolution.runtimeValue
+        }
+        if canMergeSecretKey {
+            mergedS3.secretKey = s3SecretKeyResolution.runtimeValue
+        }
+        if mergedS3.accessKey != latestS3.accessKey
+            || mergedS3.secretKey != latestS3.secretKey
+        {
+            s3Integration.accept(mergedS3)
+        }
+
+        let shouldPersistAccessKey = canMergeAccessKey
+            && s3AccessKeyResolution.persistedValue != currentS3.accessKey
+        let shouldPersistSecretKey = canMergeSecretKey
+            && s3SecretKeyResolution.persistedValue != currentS3.secretKey
+        if shouldPersistAccessKey || shouldPersistSecretKey {
+            var persistedS3 = s3Integration.value
+            // Manual migration storage bypasses S3Integration.toStorable(), so
+            // every credential field must be assigned explicitly. A field changed
+            // by a newer transaction is already Keychain-backed and stays redacted.
+            persistedS3.accessKey = canMergeAccessKey
+                ? s3AccessKeyResolution.persistedValue : ""
+            persistedS3.secretKey = canMergeSecretKey
+                ? s3SecretKeyResolution.persistedValue : ""
+            if let storedValue = encodeIntegrationForUserDefaults(persistedS3) {
+                UserDefaults.standard.set(storedValue, forKey: "s3Integration")
+            }
+        }
+
+        // Confirm removal of any plaintext fields written by pre-journal builds.
+        // If synchronization is deferred, the protected journal remains the
+        // authority and the next launch repeats this idempotent redaction pass.
+        if !UserDefaults.standard.synchronize() {
+            NSLog("Integration credential redaction synchronization was deferred")
+        }
+
+        let journalUnavailable = [
+            mixSpaceResolution,
+            slackResolution,
+            s3AccessKeyResolution,
+            s3SecretKeyResolution,
+        ].contains(where: \.journalUnavailable)
+        if journalUnavailable {
+            // Do not let integrations send with a mixture of stale preferences and
+            // unknown credential authority. Preserve every source and require an
+            // explicit backup-preserving recovery decision from the user.
+            PreferencesDataModel.setReportingEnabled(false)
+            integrationCredentialStoreUnavailable = true
+            integrationCredentialRecoveryWarning =
+                "The protected integration credential journal could not be read and was not overwritten. "
+                + "Reporting was paused. Keep the store in place, or back it up and reset it before re-entering credentials."
+            return
+        }
+
+        var integrationsNeedingCredentials: [String] = []
+        if mixSpaceResolution.requiresUserAttention,
+           mixSpaceIntegration.value.isEnabled,
+           mixSpaceIntegration.value.apiToken.isEmpty
+        {
+            integrationsNeedingCredentials.append("Mix Space")
+        }
+        if slackResolution.requiresUserAttention,
+           slackIntegration.value.isEnabled,
+           slackIntegration.value.apiToken.isEmpty
+        {
+            integrationsNeedingCredentials.append("Slack")
+        }
+        let runtimeS3 = s3Integration.value
+        if runtimeS3.isEnabled,
+           (s3AccessKeyResolution.requiresUserAttention && runtimeS3.accessKey.isEmpty
+            || s3SecretKeyResolution.requiresUserAttention && runtimeS3.secretKey.isEmpty)
+        {
+            integrationsNeedingCredentials.append("S3")
+        }
+        var integrationsUsingUnprotectedLegacyValues: [String] = []
+        if mixSpaceResolution.requiresUserAttention,
+           !mixSpaceResolution.runtimeValue.isEmpty,
+           !mixSpaceResolution.persistedValue.isEmpty
+        {
+            integrationsUsingUnprotectedLegacyValues.append("Mix Space")
+        }
+        if slackResolution.requiresUserAttention,
+           !slackResolution.runtimeValue.isEmpty,
+           !slackResolution.persistedValue.isEmpty
+        {
+            integrationsUsingUnprotectedLegacyValues.append("Slack")
+        }
+        if (s3AccessKeyResolution.requiresUserAttention
+            && !s3AccessKeyResolution.runtimeValue.isEmpty
+            && !s3AccessKeyResolution.persistedValue.isEmpty)
+            || (s3SecretKeyResolution.requiresUserAttention
+                && !s3SecretKeyResolution.runtimeValue.isEmpty
+                && !s3SecretKeyResolution.persistedValue.isEmpty)
+        {
+            integrationsUsingUnprotectedLegacyValues.append("S3")
+        }
+
+        var warnings: [String] = []
+        if !integrationsNeedingCredentials.isEmpty {
+            warnings.append(
+                "ProcessReporter could not read previously stored credentials for "
+                + integrationsNeedingCredentials.joined(separator: ", ")
+                + ". Re-enter them in Integration settings. Existing Keychain items were not deleted."
+            )
+        }
+        if !integrationsUsingUnprotectedLegacyValues.isEmpty {
+            warnings.append(
+                "Credentials for "
+                + integrationsUsingUnprotectedLegacyValues.joined(separator: ", ")
+                + " remain available, but could not be migrated into protected storage. "
+                + "Resolve the storage error and save them again."
+            )
+        }
+        if !warnings.isEmpty {
+            integrationCredentialRecoveryWarning = warnings.joined(separator: " ")
+        }
+    }
 }
 
 // MARK: - Discord Integration Model

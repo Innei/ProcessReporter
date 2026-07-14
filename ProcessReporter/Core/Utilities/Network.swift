@@ -44,3 +44,17 @@ private final class NetworkAvailabilityMonitor: @unchecked Sendable {
 func isNetworkAvailable() -> Bool {
     NetworkAvailabilityMonitor.shared.isAvailable
 }
+
+/// Accepts only literal loopback names and addresses. Prefix matching is not
+/// sufficient here because a hostname such as `127.attacker.example` is a
+/// public DNS name even though it begins with the loopback network number.
+func isLoopbackHost(_ host: String) -> Bool {
+    let normalized = host.lowercased()
+    if normalized == "localhost" || normalized == "[::1]" || normalized == "::1" {
+        return true
+    }
+
+    let octets = normalized.split(separator: ".", omittingEmptySubsequences: false)
+    guard octets.count == 4, octets.first == "127" else { return false }
+    return octets.allSatisfy { UInt8($0) != nil }
+}

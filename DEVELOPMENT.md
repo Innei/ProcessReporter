@@ -485,8 +485,9 @@ Apple credentials are optional. If all five Developer ID and notarization
 secrets are absent, the workflow produces an ad-hoc-signed, unnotarized release
 and adds a visible warning to its GitHub and Sparkle release notes. Since the
 ad-hoc identity is not stable across builds, macOS may require Gatekeeper and
-Accessibility approval again, and users may need to re-enter stored integration
-credentials after an update.
+Accessibility approval again. Integration credentials remain in a
+permissions-restricted local credential journal in this mode and are migrated
+to Keychain by the first stable team-signed build.
 If all five are present, the same workflow automatically signs, notarizes, and
 staples the application and DMG. A partial Apple configuration is rejected.
 Leave `REQUIRE_DEVELOPER_ID` unset or `false` for the current no-certificate
@@ -503,10 +504,13 @@ Do not create or replace release assets manually. Configure secrets accessible
 to the GitHub `release` job as listed in the release skill before pushing the
 first production tag.
 
-Integration credentials are stored in the macOS Keychain. Settings exports
-intentionally omit Slack, MixSpace, and S3 credentials; importing such a backup
-preserves the credentials already stored on the current Mac. Legacy plaintext
-UserDefaults values are migrated to Keychain when first loaded.
+Stable team-signed builds store integration credentials in the macOS Keychain.
+Ad-hoc builds retain them in a private Application Support credential journal
+because their signing identity is not stable enough for durable Keychain ACL
+access. Settings exports intentionally omit Slack, MixSpace, and S3 credentials;
+importing such a backup preserves the credentials already stored on the current
+Mac. The first stable team-signed build migrates journaled and legacy
+local-preference values into a versioned Keychain service.
 
 ## Troubleshooting Development Issues
 

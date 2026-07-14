@@ -65,7 +65,7 @@ class ReporterStatusItemManager: NSObject {
 
 	private func synchronizeUI() {
 		let preferences = PreferencesDataModel.shared
-		enabledItem.state = preferences.isEnabled.value ? .on : .off
+		enabledItem.state = preferences.reportingAllowed ? .on : .off
 		enableMediaReportButton.state =
 			preferences.enabledTypes.value.types.contains(.media) ? .on : .off
 		enableProcessReportButton.state =
@@ -281,7 +281,7 @@ extension ReporterStatusItemManager: NSMenuDelegate {
 			}
 		#endif
 		let preferences = PreferencesDataModel.shared
-		if preferences.isEnabled.value,
+		if preferences.reportingAllowed,
 			preferences.enabledTypes.value.types.contains(.process),
 			let info = ApplicationMonitor.shared.getFocusedWindowInfo()
 		{
@@ -296,7 +296,7 @@ extension ReporterStatusItemManager: NSMenuDelegate {
 		// and could freeze menu tracking for every open.
 		updateCurrentMediaItem(MediaInfoManager.getMediaInfo())
 		mediaRefreshTask?.cancel()
-		guard preferences.isEnabled.value,
+		guard preferences.reportingAllowed,
 			preferences.enabledTypes.value.types.contains(.media)
 		else {
 			mediaRefreshTask = nil
@@ -318,7 +318,14 @@ extension ReporterStatusItemManager {
 
 	@objc private func toggleEnabled() {
 		let isEnabled = PreferencesDataModel.shared.isEnabled.value
-		PreferencesDataModel.shared.isEnabled.accept(!isEnabled)
+		guard PreferencesDataModel.shared.setReportingEnabled(!isEnabled) else {
+			enabledItem.state = .off
+			ToastManager.shared.warning(
+				"Reporting remains paused until the credential store is recovered"
+			)
+			showSettings()
+			return
+		}
 	}
 
 	@objc private func showSettings() {

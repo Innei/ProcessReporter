@@ -174,12 +174,18 @@ final class PreferencesIntegrationViewController: NSViewController, SettingWindo
         SidebarViewController()
     }()
 
+    private lazy var rightContentViewController: NSViewController = {
+        let controller = NSViewController()
+        controller.view = NSView()
+        return controller
+    }()
+
     private lazy var rightSplitViewItem: NSSplitViewItem = {
-        let item = NSSplitViewItem(viewController: NSViewController())
+        let item = NSSplitViewItem(viewController: rightContentViewController)
         item.canCollapse = false
         return item
     }()
-    private var pendingContentSwitch: DispatchWorkItem?
+    private weak var currentContentView: NSView?
 
     override func loadView() {
         view = NSView()
@@ -216,52 +222,14 @@ final class PreferencesIntegrationViewController: NSViewController, SettingWindo
     }
 
     private func updateContentView(for type: IntegrationType) {
-        let cancelledPendingSwitch = pendingContentSwitch != nil
-        pendingContentSwitch?.cancel()
-        pendingContentSwitch = nil
-        if cancelledPendingSwitch {
-            rightSplitViewItem.viewController.view.layer?.removeAnimation(forKey: "fadeOut")
-            rightSplitViewItem.viewController.view.alphaValue = 1
-        }
-
         let newView = type.view()
-        newView.wantsLayer = true
-        newView.alphaValue = 0
+        let containerView = rightContentViewController.view
 
-        // 为当前视图创建淡出动画
-        let fadeOutAnimation = CASpringAnimation(keyPath: "opacity")
-        fadeOutAnimation.fromValue = 1.0
-        fadeOutAnimation.toValue = 0.0
-        fadeOutAnimation.duration = 0.2
-        fadeOutAnimation.damping = 12  // 弹簧阻尼，值越大弹性越小
-        fadeOutAnimation.initialVelocity = 5  // 初始速度
-        fadeOutAnimation.isRemovedOnCompletion = true
-
-        rightSplitViewItem.viewController.view.layer?.add(fadeOutAnimation, forKey: "fadeOut")
-
-        // 延迟一小段时间后切换视图并执行淡入动画
-        let workItem = DispatchWorkItem { [weak self] in
-            guard let self = self else { return }
-            self.pendingContentSwitch = nil
-            self.splitViewController.removeSplitViewItem(self.rightSplitViewItem)
-            self.rightSplitViewItem.viewController.view.removeFromSuperview()
-
-            self.rightSplitViewItem.viewController.view = newView
-            self.splitViewController.addSplitViewItem(self.rightSplitViewItem)
-
-            // 为新视图创建淡入动画
-            let fadeInAnimation = CASpringAnimation(keyPath: "opacity")
-            fadeInAnimation.fromValue = 0.0
-            fadeInAnimation.toValue = 1.0
-            fadeInAnimation.duration = 0.2
-            fadeInAnimation.damping = 12
-            fadeInAnimation.initialVelocity = 5
-            fadeInAnimation.isRemovedOnCompletion = true
-
-            newView.layer?.add(fadeInAnimation, forKey: "fadeIn")
-            newView.alphaValue = 1  // 设置最终状态
+        currentContentView?.removeFromSuperview()
+        containerView.addSubview(newView)
+        newView.snp.makeConstraints { make in
+            make.edges.equalToSuperview()
         }
-        pendingContentSwitch = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: workItem)
+        currentContentView = newView
     }
 }

@@ -59,7 +59,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // AppKit does not wait for work started from applicationWillTerminate. Defer
         // termination so pending writes are flushed before the database is released.
+        ApplicationState.isTerminating = true
+        ApplicationState.bootstrapTask?.cancel()
         terminationTask = Task { @MainActor in
+            await SettingsMutationCoordinator.shared.drain()
+            ApplicationState.bootstrapTask = nil
+            ApplicationState.reporter?.handleSleep()
+            ApplicationState.reporter = nil
             await DataStore.shared.flush()
             await Database.shared.cleanup()
             sender.reply(toApplicationShouldTerminate: true)

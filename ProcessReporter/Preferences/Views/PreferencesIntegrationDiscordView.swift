@@ -44,19 +44,6 @@ final class PreferencesIntegrationDiscordView: IntegrationView {
     private lazy var showTimestampsCheckbox: NSButton = NSButton(
         checkboxWithTitle: "", target: nil, action: nil)
 
-    private lazy var enableButtonsCheckbox: NSButton = NSButton(
-        checkboxWithTitle: "", target: nil, action: nil)
-    private lazy var buttonLabelTextField: NSScrollTextField = {
-        let tf = NSScrollTextField()
-        tf.placeholderString = "Button Label"
-        return tf
-    }()
-    private lazy var buttonUrlTextField: NSScrollTextField = {
-        let tf = NSScrollTextField()
-        tf.placeholderString = "Button URL (https://...)"
-        return tf
-    }()
-
     private lazy var customLargeImageKeyTextField: NSScrollTextField = {
         let tf = NSScrollTextField()
         tf.placeholderString = "Asset Key (Large Image)"
@@ -165,18 +152,6 @@ final class PreferencesIntegrationDiscordView: IntegrationView {
             leftView: NSTextField(labelWithString: "Show Timestamps"),
             rightView: showTimestampsCheckbox)
 
-        // Buttons
-        createRowDescription(text: "Buttons (optional, up to 1; Discord supports 2)")
-        createRow(
-            leftView: NSTextField(labelWithString: "Enable Button"),
-            rightView: enableButtonsCheckbox)
-        createRow(
-            leftView: NSTextField(labelWithString: "Button Label"),
-            rightView: buttonLabelTextField)
-        createRow(
-            leftView: NSTextField(labelWithString: "Button URL"),
-            rightView: buttonUrlTextField)
-
         // Debug
         createRowDescription(text: "Debug (updates every 2 seconds)")
         createRow(
@@ -209,10 +184,6 @@ final class PreferencesIntegrationDiscordView: IntegrationView {
         customLargeImageKeyTextField.stringValue = cfg.customLargeImageKey
         customLargeImageTextTextField.stringValue = cfg.customLargeImageText
         brandSmallImageKeyTextField.stringValue = cfg.brandSmallImageKey
-        enableButtonsCheckbox.state = cfg.enableButtons ? .on : .off
-        buttonLabelTextField.stringValue = cfg.buttonLabel
-        buttonUrlTextField.stringValue = cfg.buttonUrl
-
         updateConnectionStatus()
     }
 
@@ -238,11 +209,10 @@ final class PreferencesIntegrationDiscordView: IntegrationView {
         cfg.customLargeImageKey = customLargeImageKeyTextField.stringValue
         cfg.customLargeImageText = customLargeImageTextTextField.stringValue
         cfg.brandSmallImageKey = brandSmallImageKeyTextField.stringValue
-        cfg.enableButtons = enableButtonsCheckbox.state == .on
-        cfg.buttonLabel = buttonLabelTextField.stringValue
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        cfg.buttonUrl = buttonUrlTextField.stringValue
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // The bundled Discord Game SDK has no activity-button fields. Preserve
+        // historical label/URL values for forward compatibility, but never publish
+        // an enabled option that this build cannot honor.
+        cfg.enableButtons = false
 
         if cfg.isEnabled {
             guard !cfg.applicationId.isEmpty,
@@ -253,20 +223,6 @@ final class PreferencesIntegrationDiscordView: IntegrationView {
             }
         }
 
-        if cfg.enableButtons {
-            guard !cfg.buttonLabel.isEmpty else {
-                ToastManager.shared.error("Discord button label is required")
-                return
-            }
-            guard let components = URLComponents(string: cfg.buttonUrl),
-                  let scheme = components.scheme?.lowercased(),
-                  ["http", "https"].contains(scheme),
-                  components.host != nil
-            else {
-                ToastManager.shared.error("Discord button URL must be a valid HTTP or HTTPS URL")
-                return
-            }
-        }
         PreferencesDataModel.shared.discordIntegration.accept(cfg)
         ToastManager.shared.success("Saved!")
 		DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in

@@ -38,7 +38,7 @@ Developer ID distribution uses the following optional, all-or-none group:
 | `NOTARY_KEY_ID` | App Store Connect API key ID |
 | `NOTARY_ISSUER_ID` | App Store Connect issuer ID |
 
-When all five Apple secrets are absent, the workflow publishes an ad-hoc-signed, unnotarized application and places a visible warning in both the GitHub Release and Sparkle notes. The warning must state that Gatekeeper approval, Accessibility permission, and stored integration credentials may need renewed approval after an update because ad-hoc identity is not stable across builds. When all five are present, the workflow automatically performs Developer ID signing and notarization. A partial Apple configuration is invalid and must stop the release. Protect `v*` tags from deletion or force updates.
+When all five Apple secrets are absent, the workflow publishes an ad-hoc-signed, unnotarized application and places a visible warning in both the GitHub Release and Sparkle notes. The warning must state that Gatekeeper and Accessibility approval may need to be granted again because ad-hoc identity is not stable across builds. In this mode, integration credentials remain in a permissions-restricted local credential journal; the first stable team-signed build migrates them to Keychain. When all five Apple secrets are present, the workflow automatically performs Developer ID signing and notarization. A partial Apple configuration is invalid and must stop the release. Protect `v*` tags from deletion or force updates.
 
 Leave the repository or environment variable `REQUIRE_DEVELOPER_ID` unset (or set to `false`) while Apple credentials are unavailable. After the first Developer ID release, set it permanently to `true`; this prevents accidental credential deletion from silently downgrading later releases to ad-hoc signing.
 
@@ -56,7 +56,7 @@ Leave the repository or environment variable `REQUIRE_DEVELOPER_ID` unset (or se
 Run:
 
 ```bash
-rtk python3 .agents/skills/release-processreporter/scripts/set-release-version.py X.Y.Z
+rtk proxy python3 .agents/skills/release-processreporter/scripts/set-release-version.py X.Y.Z
 ```
 
 The script updates every Xcode configuration to `MARKETING_VERSION=X.Y.Z` and increments the unique positive `CURRENT_PROJECT_VERSION`.
@@ -88,11 +88,11 @@ Derive statements from the committed diff since the relevant previous release. P
 Run the repository's focused checks, at minimum:
 
 ```bash
-rtk bash scripts/setup_discord_sdk.sh
-rtk xcodebuild -project ProcessReporter.xcodeproj -scheme ProcessReporter -configuration Debug -destination 'generic/platform=macOS' build
-rtk xcodebuild -project ProcessReporter.xcodeproj -scheme ProcessReporter -configuration Release -destination 'generic/platform=macOS' ARCHS='arm64 x86_64' ONLY_ACTIVE_ARCH=NO build
+rtk proxy bash scripts/setup_discord_sdk.sh
+rtk proxy xcodebuild -project ProcessReporter.xcodeproj -scheme ProcessReporter -configuration Debug -destination 'generic/platform=macOS' build
+rtk proxy xcodebuild -project ProcessReporter.xcodeproj -scheme ProcessReporter -configuration Release -destination 'generic/platform=macOS' ARCHS='arm64 x86_64' ONLY_ACTIVE_ARCH=NO build
 rtk git diff --check
-rtk plutil -lint ProcessReporter/Info.plist ExportOptions.plist
+rtk proxy plutil -lint ProcessReporter/Info.plist ExportOptions.plist
 ```
 
 Also run strict-concurrency and static-analysis checks when the release changes Swift runtime or data-flow code. Verify that Sparkle resolves to the reviewed version, the Discord dylib is universal, release notes are non-empty, and tag/project versions match.
@@ -108,7 +108,7 @@ rtk git tag -a vX.Y.Z -m "ProcessReporter vX.Y.Z"
 rtk git push --atomic origin main vX.Y.Z
 ```
 
-Do not create the GitHub Release manually. The tag-triggered workflow selects Developer ID or ad-hoc distribution from the available Apple secrets, creates a hidden draft, validates the universal application, generates the signed appcast, publishes the release, and explicitly repairs GitHub's `latest` pointer. The Developer ID branch additionally validates the notarized application and DMG.
+Do not create the GitHub Release manually. The tag-triggered workflow selects Developer ID or ad-hoc distribution from the available Apple secrets, creates a hidden draft, validates the universal application, generates an appcast whose DMG enclosure has a Sparkle EdDSA signature, publishes the release, and explicitly repairs GitHub's `latest` pointer. The Developer ID branch additionally validates the notarized application and DMG.
 
 ### 6. Monitor the real endpoint
 
@@ -116,7 +116,7 @@ Watch the `Release` Actions run through completion. Confirm all of the following
 
 - The workflow concluded successfully.
 - The Release is public, non-prerelease, and marked latest.
-- The DMG, `appcast.xml`, signed Markdown notes, and `SHA256SUMS.txt` exist.
+- The DMG, `appcast.xml`, checksum-covered Markdown notes, and `SHA256SUMS.txt` exist.
 - The latest appcast references the new tag, marketing version, build number, and an EdDSA signature.
 - The published notes accurately state whether the artifact is Developer ID notarized or ad-hoc signed.
 - The asset URLs return successfully.

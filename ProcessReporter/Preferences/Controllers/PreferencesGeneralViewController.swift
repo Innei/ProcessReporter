@@ -49,7 +49,7 @@ final class PreferencesGeneralViewController: NSViewController, SettingWindowPro
     }
 
     private func synchronizeUI() {
-        enabledButton.state = PreferencesDataModel.shared.isEnabled.value ? .on : .off
+        enabledButton.state = PreferencesDataModel.shared.reportingAllowed ? .on : .off
         intervalPopup.selectItem(
             withTitle: PreferencesDataModel.shared.sendInterval.value.toString())
         focusReportButton.state = PreferencesDataModel.shared.focusReport.value ? .on : .off
@@ -69,7 +69,7 @@ final class PreferencesGeneralViewController: NSViewController, SettingWindowPro
         gridView.snp.makeConstraints { make in
             make.centerX.equalToSuperview()
             make.top.equalToSuperview().offset(40)
-            make.width.lessThanOrEqualToSuperview().inset(40)
+            make.width.lessThanOrEqualTo(560)
         }
 
         // Enabled checkbox
@@ -189,7 +189,14 @@ extension PreferencesGeneralViewController {
     }
 
     @objc private func enabledButtonClicked(sender: NSButton) {
-        PreferencesDataModel.shared.isEnabled.accept(sender.state == .on)
+        let requestedValue = sender.state == .on
+        guard PreferencesDataModel.shared.setReportingEnabled(requestedValue) else {
+            sender.state = .off
+            ToastManager.shared.warning(
+                "Reporting remains paused until the credential store is recovered"
+            )
+            return
+        }
     }
 
     @objc private func focusReportButtonClicked(sender: NSButton) {
@@ -307,11 +314,34 @@ extension PreferencesGeneralViewController {
 
         do {
             let data = try Data(contentsOf: selectedURL)
-            if PreferencesDataModel.importFromPlist(data: data) {
-                ToastManager.shared.success("Import successfully")
-                synchronizeUI()
-            } else {
-                ToastManager.shared.error("Import failed: Invalid data format")
+            SettingsMutationCoordinator.shared.enqueue { [self] in
+                switch await PreferencesDataModel.importFromPlist(data: data) {
+                case let .success(integrationsRequiringReview, ignoredFields):
+                    var warnings: [String] = []
+                    if !integrationsRequiringReview.isEmpty {
+                        warnings.append(
+                            "Review changed destinations before re-enabling "
+                                + integrationsRequiringReview.joined(separator: " and ")
+                                + "."
+                        )
+                    }
+                    if !ignoredFields.isEmpty {
+                        warnings.append(
+                            "Ignored invalid fields: "
+                                + ignoredFields.joined(separator: ", ")
+                                + "."
+                        )
+                    }
+
+                    if warnings.isEmpty {
+                        ToastManager.shared.success("Settings imported successfully")
+                    } else {
+                        ToastManager.shared.warning("Settings imported. " + warnings.joined(separator: " "))
+                    }
+                    synchronizeUI()
+                case .invalid:
+                    ToastManager.shared.error("Import failed: Invalid data format")
+                }
             }
         } catch {
             ToastManager.shared.error("Import failed: \(error.localizedDescription)")

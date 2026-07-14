@@ -161,57 +161,24 @@ actor DataStore {
     }
 
     // Reports fetching with pagination and optional search
-    func fetchReports(searchText: String? = nil, offset: Int, limit: Int, ascending: Bool) async -> [ReportValue] {
+    func fetchReports(
+        searchText: String? = nil,
+        offset: Int,
+        limit: Int,
+        ascending: Bool
+    ) async -> [ReportValue] {
+        guard limit > 0 else { return [] }
+
         do {
-            return try await Database.shared.performBackgroundTask { context in
-                var descriptor = FetchDescriptor<ReportModel>()
-                descriptor.propertiesToFetch = Self.reportHistoryProperties()
-                let models = try context.fetch(descriptor)
-                var values = models.map { model in
-                    ReportValue(
-                        id: model.id,
-                        processName: model.processName,
-                        windowTitle: model.windowTitle,
-                        timeStamp: model.timeStamp,
-                        artist: model.artist,
-                        mediaName: model.mediaName,
-                        mediaProcessName: model.mediaProcessName,
-                        mediaDuration: model.mediaDuration,
-                        mediaElapsedTime: model.mediaElapsedTime,
-                        integrations: model.integrations
-                    )
-                }
-
-                if let q = searchText, !q.isEmpty {
-                    let lowercased = q.lowercased()
-                    values = values.filter { report in
-                        if let processName = report.processName?.lowercased(),
-                           processName.contains(lowercased) { return true }
-                        if let mediaName = report.mediaName?.lowercased(),
-                           mediaName.contains(lowercased) { return true }
-                        if let artist = report.artist?.lowercased(),
-                           artist.contains(lowercased) { return true }
-                        return false
-                    }
-                }
-
-                values.sort { lhs, rhs in
-                    if lhs.timeStamp == rhs.timeStamp {
-                        return ascending
-                            ? lhs.id.uuidString < rhs.id.uuidString
-                            : lhs.id.uuidString > rhs.id.uuidString
-                    }
-                    return ascending
-                        ? lhs.timeStamp < rhs.timeStamp
-                        : lhs.timeStamp > rhs.timeStamp
-                }
-
-                return Array(
-                    values
-                        .dropFirst(max(0, offset))
-                        .prefix(max(0, limit))
-                )
-            }
+            try Task.checkCancellation()
+            return try await Database.shared.fetchReportValues(
+                searchText: searchText,
+                offset: offset,
+                limit: limit,
+                ascending: ascending
+            )
+        } catch is CancellationError {
+            return []
         } catch {
             NSLog("fetchReports failed: \(error.localizedDescription)")
             return []
@@ -240,35 +207,9 @@ actor DataStore {
 
     func cleanupOldRecordsIfNeeded() async {
         do {
-            let deletedCount = try await Database.shared.performBackgroundTask { [maxReportCount] context in
-                // Get total count
-                let countDescriptor = FetchDescriptor<ReportModel>()
-                let totalCount = try context.fetchCount(countDescriptor)
-
-                guard totalCount > maxReportCount else { return 0 }
-
-                let deleteCount = totalCount - maxReportCount
-
-                // Delete exactly the excess rows. A timestamp predicate could
-                // remove more than requested when multiple reports share the
-                // same timestamp.
-                var oldestDescriptor = FetchDescriptor<ReportModel>()
-                oldestDescriptor.propertiesToFetch = [\.id, \.timeStamp]
-                let oldestReports = try context.fetch(oldestDescriptor)
-                    .sorted { lhs, rhs in
-                        if lhs.timeStamp == rhs.timeStamp {
-                            return lhs.id.uuidString < rhs.id.uuidString
-                        }
-                        return lhs.timeStamp < rhs.timeStamp
-                    }
-                    .prefix(deleteCount)
-                for report in oldestReports {
-                    context.delete(report)
-                }
-
-                try context.save()
-                return oldestReports.count
-            }
+            let deletedCount = try await Database.shared.trimReports(
+                toMaximumCount: maxReportCount
+            )
 
             if deletedCount > 0 {
                 NSLog("Cleaned up \(deletedCount) old reports")
@@ -295,7 +236,7 @@ actor DataStore {
 extension DataStore {
     static let changedNotification = Notification.Name("DataStoreChangedNotification")
 
-    private static func reportHistoryProperties() -> [PartialKeyPath<ReportModel>] {
+    fileprivate static func reportHistoryProperties() -> [PartialKeyPath<ReportModel>] {
         [
             \.id,
             \.processName,
@@ -308,5 +249,101 @@ extension DataStore {
             \.mediaElapsedTime,
             \.integrationsData,
         ]
+    }
+
+    fileprivate static func reportValue(_ model: ReportModel) -> ReportValue {
+        ReportValue(
+            id: model.id,
+            processName: model.processName,
+            windowTitle: model.windowTitle,
+            timeStamp: model.timeStamp,
+            artist: model.artist,
+            mediaName: model.mediaName,
+            mediaProcessName: model.mediaProcessName,
+            mediaDuration: model.mediaDuration,
+            mediaElapsedTime: model.mediaElapsedTime,
+            integrations: model.integrations
+        )
+    }
+}
+
+extension Database {
+    func fetchReportValues(
+        searchText: String?,
+        offset: Int,
+        limit: Int,
+        ascending: Bool
+    ) throws -> [ReportValue] {
+        try Task.checkCancellation()
+        let context = try createBackgroundContext()
+        let order: SortOrder = ascending ? .forward : .reverse
+        let sort = [
+            SortDescriptor<ReportModel>(\.timeStamp, order: order),
+            SortDescriptor<ReportModel>(\.id, order: order),
+        ]
+        var descriptor = FetchDescriptor<ReportModel>(sortBy: sort)
+        descriptor.propertiesToFetch = DataStore.reportHistoryProperties()
+
+        let safeOffset = max(0, offset)
+        let safeLimit = max(0, limit)
+        guard let query = searchText, !query.isEmpty else {
+            // The common history path must remain database-paginated. Fetching
+            // and sorting all 5,000 rows for every page delays report writes on
+            // the same actor and makes infinite scrolling progressively slower.
+            descriptor.fetchOffset = safeOffset
+            descriptor.fetchLimit = safeLimit
+            let page = try context.fetch(descriptor)
+            try Task.checkCancellation()
+            return page.map(DataStore.reportValue)
+        }
+
+        // SwiftData does not provide a portable case-insensitive contains
+        // predicate for these optional fields. Search the bounded history in
+        // memory, but stop promptly when a newer query cancels this task.
+        let models = try context.fetch(descriptor)
+        try Task.checkCancellation()
+        let lowercasedQuery = query.lowercased()
+        var skippedMatches = 0
+        var results: [ReportValue] = []
+        results.reserveCapacity(min(safeLimit, models.count))
+
+        for (index, model) in models.enumerated() {
+            if index.isMultiple(of: 64) {
+                try Task.checkCancellation()
+            }
+            let matches = model.processName?.lowercased().contains(lowercasedQuery) == true
+                || model.mediaName?.lowercased().contains(lowercasedQuery) == true
+                || model.artist?.lowercased().contains(lowercasedQuery) == true
+            guard matches else { continue }
+            if skippedMatches < safeOffset {
+                skippedMatches += 1
+                continue
+            }
+            results.append(DataStore.reportValue(model))
+            if results.count == safeLimit { break }
+        }
+        return results
+    }
+
+    func trimReports(toMaximumCount maximumCount: Int) throws -> Int {
+        let context = try createBackgroundContext()
+        let totalCount = try context.fetchCount(FetchDescriptor<ReportModel>())
+        guard totalCount > maximumCount else { return 0 }
+
+        let deleteCount = totalCount - maximumCount
+        // Delete exactly the excess rows. A timestamp predicate could remove
+        // more than requested when multiple reports share the same timestamp.
+        var descriptor = FetchDescriptor<ReportModel>(sortBy: [
+            SortDescriptor(\.timeStamp, order: .forward),
+            SortDescriptor(\.id, order: .forward),
+        ])
+        descriptor.propertiesToFetch = [\.id, \.timeStamp]
+        descriptor.fetchLimit = deleteCount
+        let oldestReports = try context.fetch(descriptor)
+        for report in oldestReports {
+            context.delete(report)
+        }
+        try context.save()
+        return oldestReports.count
     }
 }

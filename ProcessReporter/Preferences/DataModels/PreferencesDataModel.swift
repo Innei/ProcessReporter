@@ -13,9 +13,14 @@ import RxSwift
 final class PreferencesDataModel {
 	public static let shared = PreferencesDataModel.self
 
+	enum ImportResult {
+		case success(integrationsRequiringReview: [String], ignoredFields: [String])
+		case invalid
+	}
+
     static func collectPreferences() -> [String: Any] {
         [
-            "isEnabled": PreferencesDataModel.isEnabled.value,
+            "isEnabled": PreferencesDataModel.reportingAllowed,
             "focusReport": PreferencesDataModel.focusReport.value,
             "sendInterval": PreferencesDataModel.sendInterval.value.rawValue,
             "enabledTypes": PreferencesDataModel.enabledTypes.value.toStorable() ?? [
@@ -43,82 +48,78 @@ final class PreferencesDataModel {
 			options: 0)
 	}
 
-	public static func importFromPlist(data: Data) -> Bool {
+	public static func importFromPlist(data: Data) async -> ImportResult {
 		do {
 			guard
 				let dictionary = try PropertyListSerialization.propertyList(
 					from: data, options: [], format: nil) as? [String: Any]
 			else {
-				return false
+				return .invalid
 			}
 
 			let currentMixSpace = PreferencesDataModel.mixSpaceIntegration.value
 			let currentSlack = PreferencesDataModel.slackIntegration.value
 			let currentS3 = PreferencesDataModel.s3Integration.value
+			var integrationsRequiringReview: [String] = []
+			var ignoredFields: [String] = []
 			var importedMixSpace: MixSpaceIntegration?
 			var importedSlack: SlackIntegration?
 			var importedS3: S3Integration?
-			var credentialChanges: [CredentialStore.Change] = []
 
 			if let mixSpaceDict = dictionary["mixSpaceIntegration"] as? [String: Any] {
 				var integration = MixSpaceIntegration.fromDictionary(mixSpaceDict)
-				if (mixSpaceDict["apiToken"] as? String)?.isEmpty != false {
-					integration.apiToken = currentMixSpace.apiToken
+				// Credentials are deliberately outside the plist contract. Ignore
+				// secrets embedded by historical exports and retain the current value.
+				integration.apiToken = currentMixSpace.apiToken
+				if integration.isEnabled,
+				   !currentMixSpace.apiToken.isEmpty,
+				   integration.endpoint != currentMixSpace.endpoint
+				{
+					// Importing an arbitrary endpoint must not silently rebind a
+					// credential already stored on this Mac. Preserve the credential,
+					// but require the user to review and re-enable the integration.
+					integration.isEnabled = false
+					integrationsRequiringReview.append("Mix Space")
 				}
-				credentialChanges.append(.init(
-					account: IntegrationCredentialAccount.mixSpaceToken,
-					previousValue: currentMixSpace.apiToken,
-					newValue: integration.apiToken
-				))
 				importedMixSpace = integration
 			}
 
 			if let slackDict = dictionary["slackIntegration"] as? [String: Any] {
 				var integration = SlackIntegration.fromDictionary(slackDict)
-				if (slackDict["apiToken"] as? String)?.isEmpty != false {
-					integration.apiToken = currentSlack.apiToken
-				}
-				credentialChanges.append(.init(
-					account: IntegrationCredentialAccount.slackToken,
-					previousValue: currentSlack.apiToken,
-					newValue: integration.apiToken
-				))
+				integration.apiToken = currentSlack.apiToken
 				importedSlack = integration
 			}
 
 			if let s3Dict = dictionary["s3Integration"] as? [String: Any] {
 				var integration = S3Integration.fromDictionary(s3Dict)
-				if (s3Dict["accessKey"] as? String)?.isEmpty != false {
-					integration.accessKey = currentS3.accessKey
+				integration.accessKey = currentS3.accessKey
+				integration.secretKey = currentS3.secretKey
+				let destinationChanged = [
+					integration.bucket,
+					integration.region,
+					integration.endpoint,
+					integration.path,
+				] != [
+					currentS3.bucket,
+					currentS3.region,
+					currentS3.endpoint,
+					currentS3.path,
+				]
+				if integration.isEnabled,
+				   (!currentS3.accessKey.isEmpty || !currentS3.secretKey.isEmpty),
+				   destinationChanged
+				{
+					integration.isEnabled = false
+					integrationsRequiringReview.append("S3")
 				}
-				if (s3Dict["secretKey"] as? String)?.isEmpty != false {
-					integration.secretKey = currentS3.secretKey
-				}
-				credentialChanges.append(contentsOf: [
-					.init(
-						account: IntegrationCredentialAccount.s3AccessKey,
-						previousValue: currentS3.accessKey,
-						newValue: integration.accessKey
-					),
-					.init(
-						account: IntegrationCredentialAccount.s3SecretKey,
-						previousValue: currentS3.secretKey,
-						newValue: integration.secretKey
-					),
-				])
 				importedS3 = integration
 			}
-
-			// A legacy backup may contain credentials. Commit all of those Keychain
-			// changes as one rollback-capable group before exposing any imported
-			// preference to the running reporter.
-			guard CredentialStore.apply(credentialChanges) else { return false }
 
 			// Do not let the reporter observe a half-imported configuration. Pause it,
 			// apply the complete payload, then restore the requested enabled state.
 			let desiredIsEnabled = dictionary["isEnabled"] as? Bool
 				?? PreferencesDataModel.isEnabled.value
-			PreferencesDataModel.isEnabled.accept(false)
+			PreferencesDataModel.setReportingEnabled(false)
 			if let focusReport = dictionary["focusReport"] as? Bool {
 				PreferencesDataModel.focusReport.accept(focusReport)
 			}
@@ -140,11 +141,19 @@ final class PreferencesDataModel {
                 PreferencesDataModel.discordIntegration.accept(
                     DiscordIntegration.fromDictionary(discordDict))
             }
-            if let enabledTypesArray = dictionary["enabledTypes"] as? [String] {
-                let enabledTypesSet = ReporterTypesSet(
-                    types: Set(enabledTypesArray.compactMap(Reporter.Types.fromStorable))
-                )
-                PreferencesDataModel.enabledTypes.accept(enabledTypesSet)
+			if let enabledTypesValue = dictionary["enabledTypes"] {
+				if let enabledTypesArray = enabledTypesValue as? [String] {
+					let parsedTypes = enabledTypesArray.compactMap(Reporter.Types.fromStorable)
+					if parsedTypes.count == enabledTypesArray.count {
+						PreferencesDataModel.enabledTypes.accept(
+							ReporterTypesSet(types: Set(parsedTypes))
+						)
+					} else {
+						ignoredFields.append("Report Types")
+					}
+				} else {
+					ignoredFields.append("Report Types")
+				}
 			}
 			if let ignoreNullArtist = dictionary["ignoreNullArtist"] as? Bool {
 				PreferencesDataModel.ignoreNullArtist.accept(ignoreNullArtist)
@@ -165,11 +174,16 @@ final class PreferencesDataModel {
 				PreferencesDataModel.mappingList.accept(MappingList.fromDictionary(mapping))
 			}
 
-			PreferencesDataModel.isEnabled.accept(desiredIsEnabled)
+			if !PreferencesDataModel.setReportingEnabled(desiredIsEnabled), desiredIsEnabled {
+				ignoredFields.append("Enabled state (credential store unavailable)")
+			}
 
-			return true
+			return .success(
+				integrationsRequiringReview: integrationsRequiringReview,
+				ignoredFields: ignoredFields
+			)
 		} catch {
-			return false
+			return .invalid
 		}
 	}
 }
