@@ -8,12 +8,20 @@ import Foundation
 
 public class MediaInfoManager: NSObject {
   // Callback for when playback state changes
-  public typealias PlaybackStateChangedCallback = (MediaInfo) -> Void
+  public typealias PlaybackStateChangedCallback = (MediaInfo?) -> Void
 
-  // Media info provider based on macOS version
+  // Use JXA as the state authority on modern macOS. media-control remains an
+  // optional enrichment source when it is installed.
   private static var provider: MediaInfoProvider = {
     if #available(macOS 15.4, *) {
-      return CLIMediaInfoProvider()
+      let jxaProvider = JXAMediaInfoProvider()
+      guard CLIMediaInfoProvider.isMediaControlInstalled() else {
+        return jxaProvider
+      }
+      return AdaptiveMediaInfoProvider(
+        enrichmentProvider: CLIMediaInfoProvider(),
+        authoritativeProvider: jxaProvider
+      )
     } else {
       return LegacyMediaInfoProvider()
     }
@@ -25,7 +33,7 @@ public class MediaInfoManager: NSObject {
   // Store the callback
   private static var playbackStateChangedCallback: PlaybackStateChangedCallback?
   private static var playbackDebounceCancellable: AnyCancellable?
-  private static let playbackSubject = PassthroughSubject<MediaInfo, Never>()
+  private static let playbackSubject = PassthroughSubject<MediaInfo?, Never>()
 
   // Setup the notification observer
   public static func startMonitoringPlaybackChanges(
@@ -68,11 +76,6 @@ public class MediaInfoManager: NSObject {
     // Stop current monitoring
     provider.stopMonitoring()
 
-    // Reset failure counters if provider supports it
-    if let cliProvider = provider as? CLIMediaInfoProvider {
-      cliProvider.resetFailureCounter()
-    }
-
     // Small delay to ensure clean restart
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
       // Recreate debounced sink and restart provider
@@ -91,28 +94,30 @@ public class MediaInfoManager: NSObject {
   }
 
   public static func getMediaInfo() -> MediaInfo? {
-    // Avoid blocking the main thread with synchronous CLI calls
-    if Thread.isMainThread, provider is CLIMediaInfoProvider {
+    // All modern providers may spawn an external process. Never block the UI.
+    if Thread.isMainThread {
       return latestInfo
     }
-    let info = provider.getMediaInfo()
-    if let info = info {
-      latestInfo = info
-    }
-    return info
+    return resolve(provider.fetchMediaInfo())
   }
 
   // Async API backed by the serializing actor with timeout and coalescing
   public static func getMediaInfoAsync(timeout seconds: TimeInterval = 3.0) async throws
     -> MediaInfo?
   {
-    let info = try await MediaInfoFetchActor.shared.requestInfo(using: provider, timeout: seconds)
-    if let info = info {
-      latestInfo = info
-    }
-    return info
+    let result = try await MediaInfoFetchActor.shared.requestInfo(using: provider, timeout: seconds)
+    return resolve(result)
   }
 
+  private static func resolve(_ result: MediaInfoFetchResult) -> MediaInfo? {
+    switch result {
+    case .resolved(let info):
+      latestInfo = info
+      return info
+    case .unavailable:
+      return latestInfo
+    }
+  }
 }
 
 // MARK: - Concurrency-based Media Info Actor
@@ -122,9 +127,9 @@ public class MediaInfoManager: NSObject {
 actor MediaInfoFetchActor {
   static let shared = MediaInfoFetchActor()
 
-  private var inFlightTask: Task<MediaInfo?, Error>?
+  private var inFlightTask: Task<MediaInfoFetchResult, Error>?
   private var lastRequestStart: Date?
-  private var lastCompletedResult: MediaInfo?
+  private var lastCompletedResult: MediaInfoFetchResult?
   private let coalesceInterval: TimeInterval = 0.2
 
   enum ErrorType: Swift.Error { case timeout }
@@ -135,7 +140,7 @@ actor MediaInfoFetchActor {
   /// - Returning the same in-flight Task when already running
   /// - Timeout with external process interruption (for CLI provider)
   func requestInfo(using provider: MediaInfoProvider, timeout seconds: TimeInterval = 3.0)
-    async throws -> MediaInfo?
+    async throws -> MediaInfoFetchResult
   {
     if let task = inFlightTask {
       return try await task.value
@@ -156,12 +161,12 @@ actor MediaInfoFetchActor {
 
     lastRequestStart = Date()
 
-    let task = Task<MediaInfo?, Error> {
-      // Run provider.getMediaInfo() concurrently with a timeout task
-      try await withThrowingTaskGroup(of: MediaInfo?.self) { group in
+    let task = Task<MediaInfoFetchResult, Error> {
+      // Run provider.fetchMediaInfo() concurrently with a timeout task
+      try await withThrowingTaskGroup(of: MediaInfoFetchResult.self) { group in
         group.addTask {
           // Run on a background thread, not on the actor
-          return provider.getMediaInfo()
+          return provider.fetchMediaInfo()
         }
         group.addTask {
           try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
@@ -174,10 +179,7 @@ actor MediaInfoFetchActor {
           return result
         } catch {
           group.cancelAll()
-          // On timeout/cancellation, try interrupting the CLI process if applicable
-          if let cli = provider as? CLIMediaInfoProvider {
-            cli.interruptCurrentExecProcess()
-          }
+          provider.cancelCurrentRequest()
           throw error
         }
       }
