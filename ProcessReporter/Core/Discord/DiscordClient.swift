@@ -24,6 +24,7 @@ enum DiscordActivityType: Int {
 @MainActor
 protocol DiscordClient: AnyObject {
     var isConnected: Bool { get }
+    var connectionGeneration: UInt64 { get }
     func initialize(applicationId: String)
     func setActivity(
         details: String?,
@@ -37,14 +38,16 @@ protocol DiscordClient: AnyObject {
         smallImageText: String?,
         buttons: [DiscordButton]?
     ) async throws
-    func clearActivity()
+    func clearActivity() async throws
     func shutdown()
 }
 
 final class NoopDiscordClient: DiscordClient {
     private(set) var isConnected: Bool = false
+    private(set) var connectionGeneration: UInt64 = 0
 
     func initialize(applicationId: String) {
+        advanceConnectionGeneration()
         isConnected = false
         NSLog("[Discord] Discord SDK unavailable; presence was not initialized")
         DiscordDebugStore.shared.update { snapshot in
@@ -70,7 +73,7 @@ final class NoopDiscordClient: DiscordClient {
         throw DiscordClientError.sdkUnavailable
     }
 
-    func clearActivity() {
+    func clearActivity() async throws {
         NSLog("[Discord] Noop clearActivity")
         DiscordDebugStore.shared.update { snapshot in
             snapshot.clientKind = "noop"
@@ -79,12 +82,20 @@ final class NoopDiscordClient: DiscordClient {
     }
 
     func shutdown() {
+        advanceConnectionGeneration()
         isConnected = false
         NSLog("[Discord] Noop shutdown")
         DiscordDebugStore.shared.update { snapshot in
             snapshot.clientKind = "noop"
             snapshot.isConnected = false
             snapshot.lastOutcome = "shutdown"
+        }
+    }
+
+    private func advanceConnectionGeneration() {
+        connectionGeneration &+= 1
+        if connectionGeneration == 0 {
+            connectionGeneration = 1
         }
     }
 }

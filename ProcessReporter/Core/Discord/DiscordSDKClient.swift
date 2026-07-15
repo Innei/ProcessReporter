@@ -13,8 +13,11 @@ final class DiscordSDKClient: NSObject, DiscordClient {
     private var activityCompletion: ((Result<Void, Error>) -> Void)?
     private var activityRequestCounter: UInt64 = 0
     private var activeActivityRequestIdentifier: UInt64?
+    private var activityClearCompletions = [CheckedContinuation<Void, Error>]()
+    private var activityClearInProgress = false
 
     private(set) var isConnected: Bool = false
+    private(set) var connectionGeneration: UInt64 = 0
 
     override init() {
         super.init()
@@ -25,6 +28,8 @@ final class DiscordSDKClient: NSObject, DiscordClient {
         if isConnected, self.applicationId == applicationId {
             return
         }
+
+        advanceConnectionGeneration()
 
         if self.applicationId != nil, self.applicationId != applicationId {
             bridge.shutdown()
@@ -58,7 +63,7 @@ final class DiscordSDKClient: NSObject, DiscordClient {
     ) async throws {
         try Task.checkCancellation()
         guard isConnected else { throw DiscordClientError.notConnected }
-        guard activityCompletion == nil else {
+        guard activityCompletion == nil, !activityClearInProgress else {
             throw DiscordClientError.updateAlreadyInProgress
         }
 
@@ -101,9 +106,20 @@ final class DiscordSDKClient: NSObject, DiscordClient {
         try Task.checkCancellation()
     }
 
-    func clearActivity() { bridge.clearActivity() }
+    func clearActivity() async throws {
+        guard isConnected else { return }
+
+        try await withCheckedThrowingContinuation { continuation in
+            activityClearCompletions.append(continuation)
+            guard !activityClearInProgress else { return }
+            activityClearInProgress = true
+            bridge.clearActivity()
+        }
+        try Task.checkCancellation()
+    }
 
     func shutdown() {
+        advanceConnectionGeneration()
         bridge.shutdown()
         applicationId = nil
         isConnected = false
@@ -111,6 +127,13 @@ final class DiscordSDKClient: NSObject, DiscordClient {
             snapshot.clientKind = "sdk"
             snapshot.isConnected = false
             snapshot.lastOutcome = "shutdown"
+        }
+    }
+
+    private func advanceConnectionGeneration() {
+        connectionGeneration &+= 1
+        if connectionGeneration == 0 {
+            connectionGeneration = 1
         }
     }
 }
@@ -149,6 +172,22 @@ extension DiscordSDKClient: @preconcurrency DiscordSDKBridgeDelegate {
             completion(.failure(error))
         } else {
             completion(.success(()))
+        }
+    }
+
+    func discordSDK(
+        _ bridge: DiscordSDKBridge,
+        didCompleteActivityClearWithError error: Error?
+    ) {
+        let completions = activityClearCompletions
+        activityClearCompletions.removeAll()
+        activityClearInProgress = false
+        for completion in completions {
+            if let error {
+                completion.resume(throwing: error)
+            } else {
+                completion.resume()
+            }
         }
     }
 }

@@ -48,9 +48,15 @@ static NSError *PRDiscordSDKError(NSInteger code, NSString *description) {
 @property(nonatomic) NSUInteger pendingActivityUpdateIdentifier;
 @property(nonatomic) NSUInteger nextActivityUpdateIdentifier;
 @property(nonatomic, strong) NSTimer *activityUpdateTimeoutTimer;
+@property(nonatomic) NSUInteger pendingActivityClearIdentifier;
+@property(nonatomic) NSUInteger nextActivityClearIdentifier;
+@property(nonatomic, strong) NSTimer *activityClearTimeoutTimer;
 - (NSUInteger)beginActivityUpdate;
 - (void)finishActivityUpdateWithError:(NSError *_Nullable)error
                            identifier:(NSUInteger)identifier;
+- (NSUInteger)beginActivityClear;
+- (void)finishActivityClearWithError:(NSError *_Nullable)error
+                          identifier:(NSUInteger)identifier;
 - (void)handleRuntimeDisconnectWithError:(NSError *)error;
 @end
 
@@ -72,6 +78,26 @@ static void PRDiscordActivityUpdateCallback(void *callbackData,
     [bridge handleRuntimeDisconnectWithError:error];
   } else {
     [bridge finishActivityUpdateWithError:error identifier:identifier];
+  }
+}
+
+static void PRDiscordActivityClearCallback(void *callbackData,
+                                           enum EDiscordResult result) {
+  NSUInteger identifier = (NSUInteger)(uintptr_t)callbackData;
+  NSError *error = nil;
+  if (result != DiscordResult_Ok) {
+    error = PRDiscordSDKError(
+        (NSInteger)result,
+        [NSString stringWithFormat:@"Discord rejected the activity clear (%d)",
+                                   (int)result]);
+  }
+  DiscordSDKBridge *bridge = [DiscordSDKBridge sharedInstance];
+  if (result == DiscordResult_ServiceUnavailable ||
+      result == DiscordResult_InternalError ||
+      result == DiscordResult_NotRunning) {
+    [bridge handleRuntimeDisconnectWithError:error];
+  } else {
+    [bridge finishActivityClearWithError:error identifier:identifier];
   }
 }
 #endif
@@ -143,6 +169,54 @@ static void PRDiscordActivityUpdateCallback(void *callbackData,
   [self.delegate discordSDK:self didCompleteActivityUpdateWithError:error];
 }
 
+- (NSUInteger)beginActivityClear {
+  NSUInteger previousIdentifier = self.pendingActivityClearIdentifier;
+  if (previousIdentifier != 0) {
+    [self finishActivityClearWithError:
+              PRDiscordSDKError(-11, @"Discord activity clear was superseded")
+                            identifier:previousIdentifier];
+  }
+
+  self.nextActivityClearIdentifier += 1;
+  if (self.nextActivityClearIdentifier == 0) {
+    self.nextActivityClearIdentifier = 1;
+  }
+  NSUInteger identifier = self.nextActivityClearIdentifier;
+  self.pendingActivityClearIdentifier = identifier;
+  [self.activityClearTimeoutTimer invalidate];
+  self.activityClearTimeoutTimer =
+      [NSTimer scheduledTimerWithTimeInterval:3.0
+                                       target:self
+                                     selector:@selector(activityClearDidTimeout:)
+                                     userInfo:@(identifier)
+                                      repeats:NO];
+  return identifier;
+}
+
+- (void)activityClearDidTimeout:(NSTimer *)timer {
+  NSUInteger identifier = [timer.userInfo unsignedIntegerValue];
+  [self finishActivityClearWithError:
+            PRDiscordSDKError(-12, @"Discord activity clear timed out")
+                          identifier:identifier];
+}
+
+- (void)finishActivityClearWithError:(NSError *)error
+                          identifier:(NSUInteger)identifier {
+  if (![NSThread isMainThread]) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [self finishActivityClearWithError:error identifier:identifier];
+    });
+    return;
+  }
+  if (identifier == 0 || self.pendingActivityClearIdentifier != identifier)
+    return;
+
+  self.pendingActivityClearIdentifier = 0;
+  [self.activityClearTimeoutTimer invalidate];
+  self.activityClearTimeoutTimer = nil;
+  [self.delegate discordSDK:self didCompleteActivityClearWithError:error];
+}
+
 - (void)handleRuntimeDisconnectWithError:(NSError *)error {
   if (![NSThread isMainThread]) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -179,6 +253,10 @@ static void PRDiscordActivityUpdateCallback(void *callbackData,
   [self finishActivityUpdateWithError:
             PRDiscordSDKError(-5, @"Discord client was reinitialized")
                            identifier:pendingIdentifier];
+  NSUInteger pendingClearIdentifier = self.pendingActivityClearIdentifier;
+  [self finishActivityClearWithError:
+            PRDiscordSDKError(-13, @"Discord client was reinitialized")
+                          identifier:pendingClearIdentifier];
 
   [self.runCallbacksTimer invalidate];
   self.runCallbacksTimer = nil;
@@ -534,12 +612,7 @@ static void PRDiscordActivityUpdateCallback(void *callbackData,
                                    (void *)(uintptr_t)requestIdentifier,
                                    PRDiscordActivityUpdateCallback);
 #else
-  if (buttons && buttons.count > 0) {
-    NSLog(@"[Discord SDK Shim] setActivity details=%@ state=%@ type=%@ buttons=%@", details,
-          state, activityType, buttons);
-  } else {
-    NSLog(@"[Discord SDK Shim] setActivity details=%@ state=%@ type=%@", details, state, activityType);
-  }
+  NSLog(@"[Discord SDK Shim] setActivity");
   [self finishActivityUpdateWithError:nil identifier:requestIdentifier];
 #endif
 }
@@ -549,25 +622,52 @@ static void PRDiscordActivityUpdateCallback(void *callbackData,
   [self finishActivityUpdateWithError:
             PRDiscordSDKError(-8, @"Discord activity was cleared")
                            identifier:pendingIdentifier];
-  if (!self.internalConnected)
+  NSUInteger clearIdentifier = [self beginActivityClear];
+  if (!self.internalConnected) {
+    [self finishActivityClearWithError:nil identifier:clearIdentifier];
     return;
+  }
 #if PR_HAS_DISCORD_CPP
   if (_core) {
-    _core->ActivityManager().ClearActivity([](discord::Result result) {
-      if (result == discord::Result::Ok) {
-        NSLog(@"[Discord SDK] Activity cleared");
-      }
-    });
+    __weak DiscordSDKBridge *weakSelf = self;
+    _core->ActivityManager().ClearActivity(
+        [weakSelf, clearIdentifier](discord::Result result) {
+          NSError *error = nil;
+          if (result != discord::Result::Ok) {
+            error = PRDiscordSDKError(
+                (NSInteger)result,
+                [NSString stringWithFormat:
+                              @"Discord rejected the activity clear (%d)",
+                              (int)result]);
+          }
+          [weakSelf finishActivityClearWithError:error
+                                      identifier:clearIdentifier];
+        });
+  } else {
+    [self finishActivityClearWithError:
+              PRDiscordSDKError(-6, @"Discord client is not connected")
+                            identifier:clearIdentifier];
   }
 #elif PR_HAS_DISCORD_C
   if (_cCore) {
     IDiscordActivityManager *mgr = _cCore->get_activity_manager(_cCore);
     if (mgr) {
-      mgr->clear_activity(mgr, nullptr, nullptr);
+      mgr->clear_activity(mgr, (void *)(uintptr_t)clearIdentifier,
+                          PRDiscordActivityClearCallback);
+    } else {
+      [self finishActivityClearWithError:
+                PRDiscordSDKError(-7,
+                                  @"Discord activity manager is unavailable")
+                              identifier:clearIdentifier];
     }
+  } else {
+    [self finishActivityClearWithError:
+              PRDiscordSDKError(-6, @"Discord client is not connected")
+                            identifier:clearIdentifier];
   }
 #else
   NSLog(@"[Discord SDK Shim] clearActivity");
+  [self finishActivityClearWithError:nil identifier:clearIdentifier];
 #endif
 }
 
@@ -583,6 +683,10 @@ static void PRDiscordActivityUpdateCallback(void *callbackData,
   [self finishActivityUpdateWithError:
             PRDiscordSDKError(-9, @"Discord client was shut down")
                            identifier:pendingIdentifier];
+  NSUInteger pendingClearIdentifier = self.pendingActivityClearIdentifier;
+  [self finishActivityClearWithError:
+            PRDiscordSDKError(-14, @"Discord client was shut down")
+                          identifier:pendingClearIdentifier];
   [self.runCallbacksTimer invalidate];
   self.runCallbacksTimer = nil;
 #if PR_HAS_DISCORD_CPP
@@ -618,6 +722,8 @@ static void PRDiscordActivityUpdateCallback(void *callbackData,
   self.internalConnected = NO;
   NSUInteger pendingIdentifier = self.pendingActivityUpdateIdentifier;
   [self finishActivityUpdateWithError:error identifier:pendingIdentifier];
+  NSUInteger pendingClearIdentifier = self.pendingActivityClearIdentifier;
+  [self finishActivityClearWithError:error identifier:pendingClearIdentifier];
   [self.delegate discordSDKDidDisconnect:self error:error];
 }
 

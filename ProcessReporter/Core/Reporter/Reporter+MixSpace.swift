@@ -35,6 +35,21 @@ private struct MixSpaceDataPayload: Codable {
         self.key = key
         timestamp = UInt(Int(Date().timeIntervalSince1970))
     }
+
+    var deliveryOutputSummary: SyncOutputSummary {
+        let mediaDetail = [media?.title, media?.artist, media?.processName]
+            .compactMap { value in
+                guard let value, !value.isEmpty else { return nil }
+                return value
+            }
+            .joined(separator: " — ")
+        return SyncOutputSummary(
+            title: process.name,
+            subtitle: process.description,
+            detail: mediaDetail.isEmpty ? nil : mediaDetail,
+            activityKind: "presence"
+        )
+    }
 }
 
 private let descriptionDictionary: [String: String] = [
@@ -46,7 +61,10 @@ private let descriptionDictionary: [String: String] = [
 ]
 
 @MainActor
-private func sendMixSpaceRequest(data: ReportModel) async -> Result<Void, ReporterError> {
+private func sendMixSpaceRequest(
+    data: ReportModel,
+    assetResolution: PresenceAssetResolution
+) async -> ReporterDeliveryResult {
     let config = PreferencesDataModel.shared.mixSpaceIntegration.value
     let endpoint = config.endpoint
     let method = config.requestMethod
@@ -71,13 +89,13 @@ private func sendMixSpaceRequest(data: ReportModel) async -> Result<Void, Report
         )
     }
 
-    let iconUrl = await DataStore.shared.iconURL(for: data.processInfoRaw?.applicationIdentifier ?? "")
+    let iconURL = assetResolution.publicURL
 
     var description: String?
 
     if let processName = data.processName {
         if let prefix = descriptionDictionary[processName],
-            let title = data.processInfoRaw?.title
+            let title = data.windowTitle
         {
             description = prefix + "\n" + title
         }
@@ -85,7 +103,7 @@ private func sendMixSpaceRequest(data: ReportModel) async -> Result<Void, Report
 
     let requestPayload = MixSpaceDataPayload(
         process: .init(
-            iconBase64: nil, iconUrl: iconUrl, description: description, name: data.processName),
+            iconBase64: nil, iconUrl: iconURL, description: description, name: data.processName),
         media: .init(
             artist: data.artist,
             title: data.mediaName,
@@ -101,7 +119,7 @@ private func sendMixSpaceRequest(data: ReportModel) async -> Result<Void, Report
     ]
 
     do {
-        _ = try await AF.request(
+        let request = AF.request(
             endpointURL,
             method: .init(rawValue: method.uppercased()),
             parameters: requestPayload,
@@ -112,10 +130,19 @@ private func sendMixSpaceRequest(data: ReportModel) async -> Result<Void, Report
             }
         )
         .validate()
-        .serializingData()
-        .value
+        _ = try await withTaskCancellationHandler(
+            operation: {
+                try await request.serializingData().value
+            },
+            onCancel: {
+                request.cancel()
+            }
+        )
+        try Task.checkCancellation()
 
-        return .success(())
+        return .success(
+            ReporterDeliveryReceipt(outputSummary: requestPayload.deliveryOutputSummary)
+        )
     } catch {
         NSLog(
             "MixSpace request failed: \(error.asAFError?.localizedDescription ?? error.localizedDescription)"
@@ -133,12 +160,16 @@ class MixSpaceReporterExtension: ReporterExtension {
 
     func createReporterOptions() -> ReporterOptions {
         return ReporterOptions(
-            onSend: { data in
+            assetCapability: .optionalPublicURL,
+            onSendWithAsset: { data, assetResolution in
                 if !PreferencesDataModel.shared.mixSpaceIntegration.value.isEnabled {
                     return .failure(.ignored)
                 }
 
-                return await sendMixSpaceRequest(data: data)
+                return await sendMixSpaceRequest(
+                    data: data,
+                    assetResolution: assetResolution
+                )
             }
         )
     }

@@ -25,6 +25,10 @@ class DiscordReporterExtension: ReporterExtension {
     private var initializedApplicationId: String?
     private var currentProcessName: String?
     private var processStartTimestamp: Int64?
+    private var activityClearTask: Task<Void, Never>?
+    private var activityClearPending = false
+    private var activityClearGeneration: UInt64 = 0
+    private var shutdownAfterActivityClear = false
 
     var isEnabled: Bool {
         return PreferencesDataModel.shared.discordIntegration.value.isEnabled
@@ -38,15 +42,82 @@ class DiscordReporterExtension: ReporterExtension {
 
     func unregister(from reporter: Reporter) {
         reporter.unregister(name: name)
-        clearReportedState()
+        scheduleActivityClear(shutdownAfterCompletion: true)
+        currentProcessName = nil
+        processStartTimestamp = nil
+    }
+
+    func clearReportedState() {
+        scheduleActivityClear(shutdownAfterCompletion: false)
+        currentProcessName = nil
+        processStartTimestamp = nil
+    }
+
+    func waitForPendingCleanup(until deadline: ContinuousClock.Instant) async {
+        let clock = ContinuousClock()
+        while activityClearPending, clock.now < deadline {
+            guard !Task.isCancelled else { break }
+            do {
+                try await Task.sleep(for: .milliseconds(25))
+            } catch {
+                break
+            }
+        }
+
+        if activityClearPending {
+            activityClearGeneration &+= 1
+            activityClearTask?.cancel()
+            activityClearTask = nil
+            activityClearPending = false
+            shutdownAfterActivityClear = false
+            NSLog("[Discord] Activity clear did not finish before the cleanup deadline")
+        }
         DiscordClientProvider.shared.shutdown()
         initializedApplicationId = nil
     }
 
-    func clearReportedState() {
-        DiscordClientProvider.shared.clearActivity()
-        currentProcessName = nil
-        processStartTimestamp = nil
+    private func scheduleActivityClear(shutdownAfterCompletion: Bool) {
+        shutdownAfterActivityClear = shutdownAfterActivityClear || shutdownAfterCompletion
+        guard !activityClearPending else { return }
+
+        activityClearPending = true
+        activityClearGeneration &+= 1
+        if activityClearGeneration == 0 {
+            activityClearGeneration = 1
+        }
+        let generation = activityClearGeneration
+        let connectionGeneration = DiscordClientProvider.shared.connectionGeneration
+        activityClearTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var clearFailed = false
+            if DiscordClientProvider.shared.connectionGeneration == connectionGeneration {
+                do {
+                    try await DiscordClientProvider.shared.clearActivity()
+                } catch {
+                    clearFailed = true
+                    NSLog("[Discord] Activity clear failed: \(error.localizedDescription)")
+                }
+            }
+
+            guard self.activityClearGeneration == generation else { return }
+            self.activityClearPending = false
+            self.activityClearTask = nil
+            // A timed-out SDK clear cannot safely share a connection with a new
+            // publish. Destroy the old core before any later send reinitializes it.
+            if (self.shutdownAfterActivityClear || clearFailed),
+               DiscordClientProvider.shared.connectionGeneration == connectionGeneration
+            {
+                DiscordClientProvider.shared.shutdown()
+                self.initializedApplicationId = nil
+            }
+            self.shutdownAfterActivityClear = false
+        }
+    }
+
+    private func waitForScheduledActivityClear() async {
+        if let activityClearTask {
+            await activityClearTask.value
+        }
     }
 
     private func ensureInitialized() {
@@ -143,72 +214,94 @@ class DiscordReporterExtension: ReporterExtension {
         return presence
     }
 
+    /// Mirrors the concrete transport contract implemented by
+    /// `DiscordSDKBridge`. Every C activity string is a 128-byte buffer, the
+    /// zero-initialized activity type is `playing`, and the vendored C SDK has
+    /// no button fields. Normalizing once here keeps the SDK call and persisted
+    /// output receipt derived from the same final payload.
+    private static func transportPresence(_ presence: DiscordPresence) -> DiscordPresence {
+        DiscordPresence(
+            details: transportString(presence.details),
+            state: transportString(presence.state),
+            activityType: presence.activityType ?? .playing,
+            startTimestamp: presence.startTimestamp,
+            endTimestamp: presence.endTimestamp,
+            largeImageKey: transportString(presence.largeImageKey),
+            largeImageText: transportString(presence.largeImageText),
+            smallImageKey: transportString(presence.smallImageKey),
+            smallImageText: transportString(presence.smallImageText),
+            buttons: nil
+        )
+    }
+
+    private static func transportString(_ value: String?) -> String? {
+        guard let value, !value.isEmpty else { return nil }
+        guard value.utf8.count > 127 else { return value }
+
+        var result = ""
+        var byteCount = 0
+        for character in value {
+            let fragment = String(character)
+            let fragmentByteCount = fragment.utf8.count
+            guard byteCount + fragmentByteCount <= 127 else { break }
+            result.append(character)
+            byteCount += fragmentByteCount
+        }
+        return result.isEmpty ? nil : result
+    }
+
     private func recordDebug(
-        data: ReportModel,
-        presence: DiscordPresence?,
         outcome: String,
         reason: String? = nil
     ) {
-        let reportSummary = Self.formatReportSummary(data)
-        let presenceSummary = presence.map(Self.formatPresenceSummary)
         let clientKind = DiscordClientProvider.shared is NoopDiscordClient ? "noop" : "sdk"
         let connected = DiscordClientProvider.shared.isConnected
 
         DiscordDebugStore.shared.update { snapshot in
             snapshot.lastOutcome = outcome
             snapshot.lastReason = reason
-            snapshot.lastReportSummary = reportSummary
-            snapshot.lastPresenceSummary = presenceSummary
             snapshot.clientKind = clientKind
             snapshot.isConnected = connected
         }
     }
 
-    private static func formatReportSummary(_ data: ReportModel) -> String {
-        let processName = data.processName ?? "N/A"
-        let windowTitle = data.windowTitle ?? "N/A"
-        let mediaName = data.mediaName ?? "N/A"
-        let artist = data.artist ?? "N/A"
-        let mediaProcess = data.mediaProcessName ?? "N/A"
-        let duration = data.mediaDuration.map { String(format: "%.2f", $0) } ?? "N/A"
-        let elapsed = data.mediaElapsedTime.map { String(format: "%.2f", $0) } ?? "N/A"
+    private static func deliveryOutputSummary(
+        for presence: DiscordPresence
+    ) -> SyncOutputSummary {
+        var detailComponents = [String]()
+        if let startTimestamp = presence.startTimestamp {
+            detailComponents.append("Start: \(startTimestamp)")
+        }
+        if let endTimestamp = presence.endTimestamp {
+            detailComponents.append("End: \(endTimestamp)")
+        }
+        if let largeImageKey = presence.largeImageKey, !largeImageKey.isEmpty {
+            detailComponents.append("Large image: \(largeImageKey)")
+        }
+        if let largeImageText = presence.largeImageText, !largeImageText.isEmpty {
+            detailComponents.append("Large image text: \(largeImageText)")
+        }
+        if let smallImageKey = presence.smallImageKey, !smallImageKey.isEmpty {
+            detailComponents.append("Small image: \(smallImageKey)")
+        }
+        if let smallImageText = presence.smallImageText, !smallImageText.isEmpty {
+            detailComponents.append("Small image text: \(smallImageText)")
+        }
+        let buttonLabels = presence.buttons?
+            .map(\.label)
+            .filter { !$0.isEmpty }
+            .joined(separator: ", ")
+        if let buttonLabels, !buttonLabels.isEmpty {
+            // URLs are deliberately excluded from local History.
+            detailComponents.append("Buttons: \(buttonLabels)")
+        }
 
-        return """
-        processName=\(processName)
-        windowTitle=\(windowTitle)
-        mediaName=\(mediaName)
-        artist=\(artist)
-        mediaProcess=\(mediaProcess)
-        duration=\(duration)
-        elapsed=\(elapsed)
-        """
-    }
-
-    private static func formatPresenceSummary(_ presence: DiscordPresence) -> String {
-        let details = presence.details ?? "N/A"
-        let state = presence.state ?? "N/A"
-        let typeName = activityTypeName(presence.activityType)
-        let start = presence.startTimestamp.map(String.init) ?? "N/A"
-        let end = presence.endTimestamp.map(String.init) ?? "N/A"
-        let largeKey = presence.largeImageKey ?? "N/A"
-        let largeText = presence.largeImageText ?? "N/A"
-        let smallKey = presence.smallImageKey ?? "N/A"
-        let smallText = presence.smallImageText ?? "N/A"
-        let buttons = presence.buttons?.map { "\($0.label)=\($0.url)" }.joined(separator: ", ")
-            ?? "N/A"
-
-        return """
-        details=\(details)
-        state=\(state)
-        activityType=\(typeName)
-        startTimestamp=\(start)
-        endTimestamp=\(end)
-        largeImageKey=\(largeKey)
-        largeImageText=\(largeText)
-        smallImageKey=\(smallKey)
-        smallImageText=\(smallText)
-        buttons=\(buttons)
-        """
+        return SyncOutputSummary(
+            title: presence.details,
+            subtitle: presence.state,
+            detail: detailComponents.isEmpty ? nil : detailComponents.joined(separator: " · "),
+            activityKind: presence.activityType.map { activityTypeName($0) }
+        )
     }
 
     private static func activityTypeName(_ type: DiscordActivityType?) -> String {
@@ -255,34 +348,36 @@ class DiscordReporterExtension: ReporterExtension {
     }
 
     @MainActor
-    private func sendDiscordPresence(_ data: ReportModel) async -> Result<Void, ReporterError> {
+    private func sendDiscordPresence(_ data: ReportModel) async -> ReporterDeliveryResult {
         let cfg = PreferencesDataModel.shared.discordIntegration.value
         guard cfg.isEnabled else {
-            recordDebug(data: data, presence: nil, outcome: "ignored", reason: "disabled")
+            recordDebug(outcome: "ignored", reason: "disabled")
             return .failure(.ignored)
         }
         guard !cfg.applicationId.isEmpty else {
-            recordDebug(data: data, presence: nil, outcome: "ignored", reason: "missing applicationId")
+            recordDebug(outcome: "ignored", reason: "missing applicationId")
             return .failure(.ignored)
         }
         guard let applicationId = Int64(cfg.applicationId), applicationId > 0 else {
-            recordDebug(data: data, presence: nil, outcome: "error", reason: "invalid applicationId")
+            recordDebug(outcome: "error", reason: "invalid applicationId")
             return .failure(.cancelled(message: "Discord applicationId must be a positive integer"))
         }
 
+        await waitForScheduledActivityClear()
         ensureInitialized()
         guard DiscordClientProvider.shared.isConnected else {
             let reason = DiscordClientProvider.shared is NoopDiscordClient
                 ? "Discord SDK is unavailable" : "Discord client not connected"
-            recordDebug(data: data, presence: nil, outcome: "error", reason: reason)
+            recordDebug(outcome: "error", reason: reason)
             return .failure(.cancelled(message: reason))
         }
 
-        guard let p = computePresence(from: data) else {
+        guard let computedPresence = computePresence(from: data) else {
             clearReportedState()
-            recordDebug(data: data, presence: nil, outcome: "ignored", reason: "no presence to show")
+            recordDebug(outcome: "ignored", reason: "no presence to show")
             return .failure(.ignored)
         }
+        let p = Self.transportPresence(computedPresence)
 
         do {
             try await DiscordClientProvider.shared.setActivity(
@@ -298,15 +393,21 @@ class DiscordReporterExtension: ReporterExtension {
                 buttons: p.buttons
             )
             try Task.checkCancellation()
-            recordDebug(data: data, presence: p, outcome: "success")
-            return .success(())
+            recordDebug(outcome: "success")
+            return .success(
+                ReporterDeliveryReceipt(outputSummary: Self.deliveryOutputSummary(for: p))
+            )
         } catch {
             if Task.isCancelled {
-                recordDebug(data: data, presence: p, outcome: "cancelled")
+                // Some Discord SDK transports complete setActivity even after the
+                // enclosing task is cancelled. Clear again so a stale generation
+                // cannot restore an activity after privacy or lifecycle invalidation.
+                clearReportedState()
+                recordDebug(outcome: "cancelled")
                 return .failure(.cancelled(message: "Discord activity update was cancelled"))
             }
             let reason = error.localizedDescription
-            recordDebug(data: data, presence: p, outcome: "error", reason: reason)
+            recordDebug(outcome: "error", reason: reason)
             return .failure(.networkError("Discord activity update failed: \(reason)"))
         }
     }

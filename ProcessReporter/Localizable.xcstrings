@@ -1,0 +1,629 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "" : {
+
+    },
+    "%arg application icon(s) waiting for retry." : {
+
+    },
+    "%arg seconds" : {
+
+    },
+    "%arg, %arg" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$arg, %2$arg"
+          }
+        }
+      }
+    },
+    "%arg: %arg" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%1$arg: %2$arg"
+          }
+        }
+      }
+    },
+    "123456789012345678" : {
+
+    },
+    ":computer:" : {
+
+    },
+    ":headphones:" : {
+
+    },
+    "A Legacy Mapping is also applied to this application." : {
+
+    },
+    "A local audit of sanitized Presence deliveries." : {
+
+    },
+    "Add Application…" : {
+
+    },
+    "Add Condition" : {
+
+    },
+    "Add mapping" : {
+
+    },
+    "Application Rules" : {
+
+    },
+    "Application icons are uploaded on demand. Providers receive only the resulting public URL; S3 is not a Presence destination." : {
+
+    },
+    "At least one configured destination is ready." : {
+
+    },
+    "Back" : {
+
+    },
+    "Bucket name" : {
+
+    },
+    "Cached Application Icons" : {
+
+    },
+    "Cancel" : {
+
+    },
+    "Check for Updates…" : {
+
+    },
+    "Choose App…" : {
+
+    },
+    "Choose an application" : {
+
+    },
+    "Choose where Presence is delivered and how public icon URLs are hosted." : {
+
+    },
+    "Clear Cache" : {
+
+    },
+    "Clear Cache…" : {
+
+    },
+    "Clear History" : {
+
+    },
+    "Clear Icon Cache?" : {
+
+    },
+    "Clear Icon Cache…" : {
+
+    },
+    "Clear Local Cache" : {
+
+    },
+    "Clear Local Icon Cache?" : {
+
+    },
+    "Clear Sync History?" : {
+
+    },
+    "Clear Sync History…" : {
+
+    },
+    "Clearing local records never deletes remote S3 objects." : {
+
+    },
+    "Conditional Emoji" : {
+
+    },
+    "Configure Application Icon Hosting…" : {
+
+    },
+    "Configured" : {
+
+    },
+    "Confirm Permanent Erasure" : {
+
+    },
+    "Continue" : {
+
+    },
+    "Convert to Structured Rule" : {
+
+    },
+    "Copy Diagnostics" : {
+
+    },
+    "Copy Event as JSON" : {
+
+    },
+    "Create or configure a Slack app" : {
+
+    },
+    "Credential will be removed when saved" : {
+
+    },
+    "Delete" : {
+
+    },
+    "Destination" : {
+
+    },
+    "Destinations" : {
+
+    },
+    "Diagnostics exclude credentials, endpoints, window titles, media titles, and raw provider responses." : {
+
+    },
+    "Discard Changes" : {
+
+    },
+    "Display Alias" : {
+
+    },
+    "Done" : {
+
+    },
+    "Edit" : {
+
+    },
+    "Emoji" : {
+
+    },
+    "Enabled" : {
+
+    },
+    "Enter target process name" : {
+
+    },
+    "Enter the original name" : {
+
+    },
+    "Erase All App Data" : {
+
+    },
+    "Erase All App Data?" : {
+
+    },
+    "Erase All App Data…" : {
+
+    },
+    "Erase Everything" : {
+
+    },
+    "Existing button values are retained for compatibility but are not tested or published by the bundled Discord transport." : {
+
+    },
+    "Expiration" : {
+
+    },
+    "Export Settings…" : {
+
+    },
+    "Failed Upload Queue" : {
+
+    },
+    "Filter Type" : {
+
+    },
+    "Final Presence Preview" : {
+
+    },
+    "Finding applications…" : {
+
+    },
+    "Finish Without Sharing" : {
+
+    },
+    "From" : {
+
+    },
+    "Hide takes priority over the alias. An empty alias uses the original name." : {
+
+    },
+    "Image asset keys must already exist in the Discord application. Testing publishes the supported fields from this draft, temporarily replaces the current Rich Presence, then clears it; it does not save." : {
+
+    },
+    "Import Settings…" : {
+
+    },
+    "Insert Variable" : {
+
+    },
+    "Inspect the sanitized Presence and delivery results." : {
+
+    },
+    "Keep Stored Credential" : {
+
+    },
+    "Last %arg ·" : {
+
+    },
+    "Latest Safe Error" : {
+
+    },
+    "Legacy Mapping" : {
+
+    },
+    "Legacy condition requires review" : {
+
+    },
+    "Loading Sync History…" : {
+
+    },
+    "Local Icon URL Cache" : {
+
+    },
+    "Local icon URL records, upload fingerprints, and the failed-upload queue will be removed. Remote S3 objects will not be deleted." : {
+
+    },
+    "Local public URL records will be removed. Remote S3 objects will not be deleted." : {
+
+    },
+    "Manage Cached Icons…" : {
+
+    },
+    "Mapping" : {
+
+    },
+    "MixSpace receives application, window-title, media, and optional hosted-icon fields after Privacy & Rules are applied." : {
+
+    },
+    "No Application Rules" : {
+
+    },
+    "No Sync Events" : {
+
+    },
+    "No destination audit metadata is available." : {
+
+    },
+    "No destinations configured" : {
+
+    },
+    "No sync yet" : {
+
+    },
+    "Nothing to share after Privacy & Rules." : {
+
+    },
+    "Open" : {
+
+    },
+    "Open Discord Developer Portal" : {
+
+    },
+    "Open Legacy Mappings…" : {
+
+    },
+    "Open Privacy and Rules for this Presence." : {
+
+    },
+    "Open Sync Event details." : {
+
+    },
+    "Open destination settings." : {
+
+    },
+    "Open…" : {
+
+    },
+    "Operator" : {
+
+    },
+    "Optional" : {
+
+    },
+    "Preference defaults will be restored. History, icon cache, and credentials are preserved." : {
+
+    },
+    "Preparing sanitized Presence…" : {
+
+    },
+    "Preparing sanitized preview…" : {
+
+    },
+    "Presence Destinations" : {
+
+    },
+    "Presence Setup" : {
+
+    },
+    "Presence delivery continues without icon hosting." : {
+
+    },
+    "Prioritize media when both sources are available" : {
+
+    },
+    "ProcessReporter" : {
+
+    },
+    "ProcessReporter will return to onboarding after local data is removed." : {
+
+    },
+    "Quit" : {
+
+    },
+    "Raw Process and Media Rewrites" : {
+
+    },
+    "Re-upload current icons for every local cache record using the saved configuration." : {
+
+    },
+    "Ready Destinations" : {
+
+    },
+    "Rebuild Cache" : {
+
+    },
+    "Rebuild Cache…" : {
+
+    },
+    "Rebuild Hosted Icon Cache" : {
+
+    },
+    "Rebuild Hosted Icon Cache?" : {
+
+    },
+    "Refresh Preview" : {
+
+    },
+    "Remove" : {
+
+    },
+    "Remove Application Rule?" : {
+
+    },
+    "Remove Rule" : {
+
+    },
+    "Remove Slack emoji condition" : {
+
+    },
+    "Remove rule for %arg" : {
+
+    },
+    "Remove selected mappings" : {
+
+    },
+    "Remove settings, Sync History, icon cache, and protected credentials." : {
+
+    },
+    "Removing this rule also removes its legacy Hide projection and may allow the application to be shared under the global defaults. Legacy Mappings are preserved." : {
+
+    },
+    "Replace" : {
+
+    },
+    "Request Accessibility Access…" : {
+
+    },
+    "Request Method" : {
+
+    },
+    "Reset Settings" : {
+
+    },
+    "Reset Settings?" : {
+
+    },
+    "Reset Settings…" : {
+
+    },
+    "Resources" : {
+
+    },
+    "Restore preference defaults without deleting local history or credentials." : {
+
+    },
+    "Result" : {
+
+    },
+    "Retry Failed Application Icon Uploads?" : {
+
+    },
+    "Retry Failed Uploads…" : {
+
+    },
+    "Retry Uploads" : {
+
+    },
+    "Reveal Application Data in Finder" : {
+
+    },
+    "Review compatibility mappings retained from earlier versions." : {
+
+    },
+    "Rich Presence buttons are unavailable in this build." : {
+
+    },
+    "Rules are evaluated from top to bottom; the first match supplies the emoji." : {
+
+    },
+    "Run External Test?" : {
+
+    },
+    "Save" : {
+
+    },
+    "Save Changes" : {
+
+    },
+    "Save Changes Before Leaving?" : {
+
+    },
+    "Save Destination Changes?" : {
+
+    },
+    "Save Rule" : {
+
+    },
+    "Save and Stop Sharing" : {
+
+    },
+    "Search application rules" : {
+
+    },
+    "Search applications" : {
+
+    },
+    "Search applications or media" : {
+
+    },
+    "Select a Sync Event" : {
+
+    },
+    "Set Up Later" : {
+
+    },
+    "Set up a Presence destination" : {
+
+    },
+    "Set up a destination to start sharing Presence." : {
+
+    },
+    "Setting the rewrite rules for the display name when a process is reported." : {
+
+    },
+    "Settings…" : {
+
+    },
+    "Setup can be completed without enabling sharing. S3 icon hosting is always optional." : {
+
+    },
+    "Share Presence" : {
+
+    },
+    "Share application activity" : {
+
+    },
+    "Share media activity" : {
+
+    },
+    "Show activity timestamps" : {
+
+    },
+    "Start Sharing" : {
+
+    },
+    "Status text" : {
+
+    },
+    "Step %arg" : {
+
+    },
+    "Stop Presence Sharing?" : {
+
+    },
+    "Stored ••••••••" : {
+
+    },
+    "Sync Event" : {
+
+    },
+    "Sync History" : {
+
+    },
+    "Sync History Unavailable" : {
+
+    },
+    "Target Name" : {
+
+    },
+    "Testing sends the current sanitized Presence as a real external write using this draft. It does not save the draft." : {
+
+    },
+    "Testing uploads the selected application icon, verifies its public URL with an unauthenticated GET, and retains the remote object. The draft is not saved." : {
+
+    },
+    "Testing writes a real Slack status with this draft and its configured expiration; it does not save the draft." : {
+
+    },
+    "The current destination draft has unsaved changes." : {
+
+    },
+    "The token requires the users.profile:write user scope." : {
+
+    },
+    "This change disables the last ready Presence destination. Saving it will turn off the global Presence sharing switch." : {
+
+    },
+    "This change disables the last ready destination and will turn off global Presence sharing." : {
+
+    },
+    "This destination has an unsaved draft. Save or discard it before returning to the destination list." : {
+
+    },
+    "This is the last ready destination. Saving will turn off global Presence sharing before leaving Destinations." : {
+
+    },
+    "This performs real S3 uploads for queued applications using the saved configuration. Successfully uploaded public URLs replace their local cache records." : {
+
+    },
+    "This permanently removes all local Sync Events." : {
+
+    },
+    "This permanently removes all local Sync Events. Destination settings are preserved." : {
+
+    },
+    "This re-uploads every currently cached application icon using the saved S3 configuration. Existing remote objects are not deleted." : {
+
+    },
+    "This removes settings, history, icon cache, and protected credentials. This action cannot be undone." : {
+
+    },
+    "To" : {
+
+    },
+    "Type" : {
+
+    },
+    "Undo" : {
+
+    },
+    "Use Listening activity type for media" : {
+
+    },
+    "Use original application name" : {
+
+    },
+    "Value" : {
+
+    },
+    "Variable" : {
+
+    },
+    "When configured, icons are uploaded on demand and their public URLs are cached locally. A hosting failure degrades only the icon enhancement." : {
+
+    },
+    "Working" : {
+
+    },
+    "app-icons" : {
+
+    },
+    "https://cdn.example.com" : {
+
+    },
+    "https://example.com" : {
+
+    },
+    "https://example.com/api/presence" : {
+
+    },
+    "https://s3.example.com" : {
+
+    },
+    "processreporter" : {
+
+    },
+    "us-east-1" : {
+
+    }
+  },
+  "version" : "1.2"
+}

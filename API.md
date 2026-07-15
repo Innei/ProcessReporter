@@ -1,601 +1,219 @@
-# ProcessReporter API Documentation
+# ProcessReporter Internal API Guide
 
-This document provides comprehensive API documentation for extending ProcessReporter with custom integrations and understanding the core interfaces.
+This document describes the internal contracts used to capture, sanitize, deliver, and audit Presence. These types are application-internal; ProcessReporter does not currently expose a binary plugin ABI.
 
-## Table of Contents
+## Reporter extensions
 
-1. [ReporterExtension Protocol](#reporterextension-protocol)
-2. [Core API Interfaces](#core-api-interfaces)
-   - [MediaInfoProvider Protocol](#mediainfoprovider-protocol)
-   - [ApplicationMonitor](#applicationmonitor)
-3. [Data Models](#data-models)
-   - [ReportModel](#reportmodel)
-   - [FocusedWindowInfo](#focusedwindowinfo)
-   - [MediaInfo](#mediainfo)
-4. [Integration API Examples](#integration-api-examples)
-   - [MixSpace Integration](#mixspace-integration)
-   - [S3 Integration](#s3-integration)
-   - [Slack Integration](#slack-integration)
-5. [Creating Custom Extensions](#creating-custom-extensions)
-
-## ReporterExtension Protocol
-
-The `ReporterExtension` protocol is the primary interface for creating custom integrations with ProcessReporter.
-
-### Protocol Definition
+`ReporterExtension` represents a Presence destination. S3-compatible storage does not conform to this protocol because it is asset infrastructure.
 
 ```swift
+@MainActor
 protocol ReporterExtension {
-    /// The unique name identifier for this extension
     var name: String { get }
-    
-    /// Whether this extension is currently enabled
     var isEnabled: Bool { get }
-    
-    /// Register this extension with the reporter
-    /// - Parameter reporter: The Reporter instance to register with
-    func register(to reporter: Reporter) async
-    
-    /// Unregister this extension from the reporter
-    /// - Parameter reporter: The Reporter instance to unregister from
-    func unregister(from reporter: Reporter) async
-    
-    /// Create reporter options for this extension
-    /// - Returns: ReporterOptions containing the send handler
+
+    func register(to reporter: Reporter)
+    func unregister(from reporter: Reporter)
+    func clearReportedState()
+    func waitForPendingCleanup(
+        until deadline: ContinuousClock.Instant
+    ) async
     func createReporterOptions() -> ReporterOptions
 }
 ```
 
-### Default Implementation
+| Member | Responsibility |
+| --- | --- |
+| `register` | Install the destination’s generation-scoped send handler |
+| `unregister` | Remove the handler and clear retained remote Presence when applicable |
+| `clearReportedState` | Cancel or supersede pending publication and clear retained state |
+| `waitForPendingCleanup` | Participate in bounded termination cleanup |
+| `createReporterOptions` | Declare asset requirements and return the delivery callback |
 
-The protocol provides default implementations for `register` and `unregister`:
+Default implementations register and unregister by name, perform no remote cleanup, and return immediately from the cleanup wait.
 
-```swift
-extension ReporterExtension {
-    func register(to reporter: Reporter) async {
-        await reporter.register(name: name, options: createReporterOptions())
-    }
-    
-    func unregister(from reporter: Reporter) async {
-        await reporter.unregister(name: name)
-    }
-}
-```
-
-### ReporterOptions
+## Reporter options and receipts
 
 ```swift
 struct ReporterOptions {
-    /// Async handler for sending report data
-    /// - Parameter data: The ReportModel containing activity data
-    /// - Returns: Result indicating success or ReporterError
-    let onSend: (_ data: ReportModel) async -> Result<Void, ReporterError>
+    let priority: Int
+    let assetCapability: PresenceAssetCapability
+    let onSend: @MainActor @Sendable (
+        _ data: ReportModel,
+        _ assetResolution: PresenceAssetResolution
+    ) async -> ReporterDeliveryResult
+}
+
+struct ReporterDeliveryReceipt: Sendable {
+    let outputSummary: SyncOutputSummary
+}
+
+typealias ReporterDeliveryResult = Result<
+    ReporterDeliveryReceipt,
+    ReporterError
+>
+```
+
+`data` is already sanitized. A destination must not recover raw source values through another subsystem. A successful receipt contains a safe summary derived from the final provider render. It must not contain credentials, endpoints, authorization headers, public asset URLs, button URLs, or raw responses.
+
+Failed and skipped deliveries do not persist an output summary.
+
+## Asset capability
+
+```swift
+enum PresenceAssetCapability {
+    case unsupported
+    case optionalPublicURL
+    case requiredPublicURL
 }
 ```
 
-### ReporterError
+| Capability | Behavior |
+| --- | --- |
+| `unsupported` | Destination starts without waiting for icon hosting |
+| `optionalPublicURL` | Resolve once; failure degrades the asset but does not block text Presence |
+| `requiredPublicURL` | Delivery may be skipped or fail when no public URL can be supplied |
+
+The Reporter resolves one shared asset result for the current delivery generation. Each destination receives `.notRequested` when it declares no asset support.
+
+## Asset hosting
 
 ```swift
-enum ReporterError: Error {
+protocol AssetHostingService: Sendable {
+    func resolveApplicationIcon(
+        for report: ReportModel,
+        capability: PresenceAssetCapability
+    ) async -> PresenceAssetResolution
+}
+```
+
+`S3AssetHostingService` is the production implementation. It stores icon URL records through `DataStore`, keeps upload fingerprints in the local icon-cache authority, and records failed application identifiers in a credential-free local retry queue. `retryFailedUploads()` retries queued applications; `rebuildCachedIcons()` reloads installed application icons for current cache records and uploads them again. It is not registered in the destination mapping and never creates a delivery result.
+
+`PresenceAssetResolution` distinguishes not requested, not configured, cached, uploaded, and failed outcomes. Only the in-memory delivery path may consume the public URL; persisted Sync Events retain a normalized asset status without the URL.
+
+## Delivery errors
+
+```swift
+enum ReporterError: Error, Sendable {
     case networkError(String)
     case cancelled(message: String)
     case unknown(message: String, successIntegrations: [String])
     case ratelimitExceeded(message: String)
-    case ignored // Used when extension is disabled
+    case ignored
     case databaseError(String)
 }
 ```
 
-## Core API Interfaces
+Provider-specific error text may be used for immediate diagnostics, but History persists only the normalized `persistenceCode` and safe `persistenceMessage` projections.
 
-### MediaInfoProvider Protocol
+`ignored` represents a destination-specific no-op and is stored as skipped, not succeeded.
 
-The `MediaInfoProvider` protocol defines the interface for media information sources.
+## Sanitized report model
 
-```swift
-protocol MediaInfoProvider {
-    /// Start monitoring playback changes
-    /// - Parameter callback: Closure called when media playback state changes
-    func startMonitoring(callback: @escaping MediaInfoManager.PlaybackStateChangedCallback)
-    
-    /// Stop monitoring playback changes
-    func stopMonitoring()
-    
-    /// Get current media information
-    /// - Returns: MediaInfo if media is playing, nil otherwise
-    func getMediaInfo() -> MediaInfo?
-}
-```
+`ReportModel` is the internal bridge between source capture and destination rendering. Its scalar fields are sanitized before `ReporterOptions.onSend` is called.
 
-#### MediaInfoManager
-
-The `MediaInfoManager` provides a static interface for media monitoring:
-
-```swift
-public class MediaInfoManager {
-    /// Start monitoring system-wide media playback changes
-    /// - Parameter callback: Called when media playback state changes
-    public static func startMonitoringPlaybackChanges(
-        callback: @escaping (MediaInfo) -> Void
-    )
-    
-    /// Stop monitoring playback changes
-    public static func stopMonitoringPlaybackChanges()
-    
-    /// Get current media information
-    /// - Returns: Current MediaInfo if media is playing
-    public static func getMediaInfo() -> MediaInfo?
-}
-```
-
-### ApplicationMonitor
-
-The `ApplicationMonitor` singleton monitors application focus and window changes.
-
-```swift
-class ApplicationMonitor {
-    /// Shared singleton instance
-    static let shared = ApplicationMonitor()
-    
-    /// Callback for mouse click events
-    var onMouseClicked: ((MouseClickInfo) -> Void)?
-    
-    /// Callback for window focus changes
-    var onWindowFocusChanged: ((FocusedWindowInfo) -> Void)?
-    
-    /// Check if accessibility permissions are enabled
-    /// - Returns: true if accessibility is enabled
-    func isAccessibilityEnabled() -> Bool
-    
-    /// Get information about the currently focused window
-    /// - Returns: FocusedWindowInfo if available
-    func getFocusedWindowInfo() -> FocusedWindowInfo?
-    
-    /// Start monitoring mouse click events
-    func startMouseMonitoring()
-    
-    /// Stop monitoring mouse click events
-    func stopMouseMonitoring()
-    
-    /// Start monitoring window focus changes
-    func startWindowFocusMonitoring()
-    
-    /// Stop monitoring window focus changes
-    func stopWindowFocusMonitoring()
-}
-```
-
-## Data Models
-
-### ReportModel
-
-The `ReportModel` is the central data structure containing all activity information sent to integrations.
+Relevant values include:
 
 ```swift
 @Model
-class ReportModel {
-    /// Unique identifier
+final class ReportModel {
     var id: UUID
-    
-    /// Process/Application information
     var processName: String?
     var windowTitle: String?
-    
-    /// Media information
     var artist: String?
     var mediaName: String?
     var mediaProcessName: String?
     var mediaDuration: Double?
     var mediaElapsedTime: Double?
-    var mediaImageData: Data? // Base64 decoded image data
-    
-    /// Timestamp of the report
     var timeStamp: Date
-    
-    /// List of integrations this report was sent to
-    var integrations: [String]
-    
-    /// Raw data structures (transient)
-    @Transient var mediaInfoRaw: MediaInfo?
+    var integrationsData: Data?
+
     @Transient var processInfoRaw: FocusedWindowInfo?
-    
-    /// Set media information from MediaInfo
-    func setMediaInfo(_ mediaInfo: MediaInfo)
-    
-    /// Set process information from FocusedWindowInfo
-    func setProcessInfo(_ processInfo: FocusedWindowInfo)
+    @Transient var mediaInfoRaw: MediaInfo?
 }
 ```
 
-#### Computed Properties
+The properties named `processInfoRaw` and `mediaInfoRaw` are transient capture structures. They must not be serialized into History or exported. By the time a destination receives the model, these structures have already been filtered and rewritten to match the sanitized scalar snapshot.
+
+## Privacy policy
+
+`PresencePrivacyEvaluator` combines:
+
+1. source switches from General;
+2. global `PresencePrivacyDefaults`;
+3. application-specific `ApplicationPresenceRule` values;
+4. fail-closed legacy filter projections.
+
+Legacy name and identifier mappings execute after privacy visibility decisions. Explicit application aliases then override mapped display names. Hide always has final priority.
+
+Consumers that need a preview should use the same ordering and sanitized source values; they must not implement a raw-snapshot preview.
+
+## Sync Event persistence
+
+The existing report compatibility field stores a versioned Codable envelope:
 
 ```swift
-extension ReportModel {
-    /// Whether this report contains media information
-    var hasMediaInfo: Bool
-    
-    /// Whether this report contains process information
-    var hasProcessInfo: Bool
-    
-    /// Display name (media name or process name)
-    var displayName: String
-    
-    /// Subtitle (artist or window title)
-    var subtitle: String?
+struct StoredSyncEventPayload: Codable, Sendable {
+    let trigger: SyncEventTrigger
+    let assetResult: SyncAssetResult
+    let deliveryResults: [SyncDeliveryResult]
 }
 ```
 
-### FocusedWindowInfo
+Each `SyncDeliveryResult` contains:
 
-Represents information about the currently focused application window.
+- stable destination ID and display name;
+- succeeded, failed, or skipped status;
+- start and finish timestamps;
+- a successful safe output summary, when available;
+- normalized error code and message for failures.
+
+The decoder returns one of three compatibility states:
+
+| State | Meaning |
+| --- | --- |
+| Modern | Versioned structured payload decoded successfully |
+| Legacy | Historical integration-name array; no fabricated failure detail |
+| Unreadable | Scalar sanitized snapshot remains available; payload metadata is unknown |
+
+`DataStore.fetchSyncEvents` returns value projections only. A privacy-stale event is quarantined before physical deletion and excluded from queries until deletion succeeds.
+
+## Source providers
+
+`ApplicationMonitor` supplies focused application identity and optional window information. Accessibility is requested only by explicit user action.
+
+`MediaInfoManager` owns the selected media provider and playback-change lifecycle. The Reporter stops media monitoring when the Media source is disabled, during sleep, and during disposal.
+
+Source callbacks are generation-scoped. Network recovery requests a fresh capture rather than replaying a retained report.
+
+## Settings and credentials
+
+Destination configuration values are held by relays in `PreferencesDataModel`. Secret values are hydrated from `CredentialStore` before Reporter creation.
+
+All integration saves and maintenance operations use `SettingsMutationCoordinator`. Credential changes are persisted before the corresponding runtime relay is updated.
+
+Credential editors use an explicit intent:
 
 ```swift
-struct FocusedWindowInfo {
-    /// Application name (e.g., "Safari", "Xcode")
-    var appName: String
-    
-    /// Application icon
-    var icon: NSImage?
-    
-    /// Bundle identifier (e.g., "com.apple.Safari")
-    var applicationIdentifier: String
-    
-    /// Window title (requires accessibility permissions)
-    var title: String?
+enum DestinationCredentialIntent {
+    case unchanged
+    case replace
+    case remove
 }
 ```
 
-### MediaInfo
+An unchanged credential is never copied into the editor. Export dictionaries omit all credential fields.
 
-Contains information about currently playing media.
+## Adding a destination
 
-```swift
-public struct MediaInfo {
-    /// Track/song name
-    let name: String?
-    
-    /// Artist name
-    let artist: String?
-    
-    /// Album name
-    let album: String?
-    
-    /// Album artwork as base64 string
-    let image: String?
-    
-    /// Total duration in seconds
-    let duration: Double
-    
-    /// Current playback position in seconds
-    let elapsedTime: Double
-    
-    /// Process ID of the media player
-    let processID: Int
-    
-    /// Process name (e.g., "Music", "Spotify")
-    var processName: String
-    
-    /// Executable path of the media player
-    let executablePath: String
-    
-    /// Whether media is currently playing
-    let playing: Bool
-    
-    /// Bundle identifier of the media player
-    let applicationIdentifier: String?
-}
-```
+An implementation is complete only when it provides:
 
-## Integration API Examples
+1. a stable `PresenceDestinationID`;
+2. a `ReporterExtension` with normalized errors and cleanup semantics;
+3. a final-payload-derived safe delivery receipt;
+4. an explicit asset capability;
+5. native draft, test, save, and credential interactions in Settings;
+6. menu-bar and History presentation;
+7. verification for cancellation, partial failure, offline recovery, pause, sleep, and termination.
 
-### MixSpace Integration
-
-The MixSpace integration sends activity data to a MixSpace instance.
-
-```swift
-class MixSpaceReporterExtension: ReporterExtension {
-    var name: String = "MixSpace"
-    
-    var isEnabled: Bool {
-        return PreferencesDataModel.shared.mixSpaceIntegration.value.isEnabled
-    }
-    
-    func createReporterOptions() -> ReporterOptions {
-        return ReporterOptions(
-            onSend: { data in
-                if !self.isEnabled {
-                    return .failure(.ignored)
-                }
-                
-                // Create payload
-                let payload = MixSpaceDataPayload(
-                    process: ProcessInfo(
-                        iconUrl: iconUrl,
-                        description: description,
-                        name: data.processName
-                    ),
-                    media: MediaInfo(
-                        artist: data.artist,
-                        title: data.mediaName,
-                        duration: data.mediaDuration,
-                        elapsedTime: data.mediaElapsedTime,
-                        processName: data.mediaProcessName
-                    ),
-                    key: apiToken
-                )
-                
-                // Send HTTP request
-                let response = try await AF.request(
-                    endpoint,
-                    method: method,
-                    parameters: payload,
-                    encoder: JSONParameterEncoder.default
-                )
-                .validate()
-                .serializingData()
-                .value
-                
-                return .success(())
-            }
-        )
-    }
-}
-```
-
-### S3 Integration
-
-The S3 integration uploads activity data to an S3-compatible storage service.
-
-```swift
-class S3ReporterExtension: ReporterExtension {
-    var name: String = "S3"
-    
-    var isEnabled: Bool {
-        return PreferencesDataModel.shared.s3Integration.value.isEnabled
-    }
-    
-    func createReporterOptions() -> ReporterOptions {
-        return ReporterOptions(
-            onSend: { data in
-                // Implementation uploads JSON data to S3
-                // Uses AWS SDK or compatible S3 client
-                // Configurable bucket, region, and credentials
-            }
-        )
-    }
-}
-```
-
-### Slack Integration
-
-The Slack integration posts activity updates to a Slack channel.
-
-```swift
-class SlackReporterExtension: ReporterExtension {
-    var name: String = "Slack"
-    
-    var isEnabled: Bool {
-        return PreferencesDataModel.shared.slackIntegration.value.isEnabled
-    }
-    
-    func createReporterOptions() -> ReporterOptions {
-        return ReporterOptions(
-            onSend: { data in
-                // Implementation sends formatted message to Slack webhook
-                // Includes activity summary and optional media information
-            }
-        )
-    }
-}
-```
-
-## Creating Custom Extensions
-
-### Step 1: Create Extension Class
-
-Create a new class conforming to `ReporterExtension`:
-
-```swift
-import Foundation
-
-class MyCustomReporterExtension: ReporterExtension {
-    var name: String = "MyCustomIntegration"
-    
-    var isEnabled: Bool {
-        // Read from preferences or configuration
-        return PreferencesDataModel.shared.myCustomIntegration.value.isEnabled
-    }
-    
-    func createReporterOptions() -> ReporterOptions {
-        return ReporterOptions(
-            onSend: { data in
-                await self.sendData(data)
-            }
-        )
-    }
-    
-    private func sendData(_ data: ReportModel) async -> Result<Void, ReporterError> {
-        // Implementation here
-        do {
-            // 1. Extract needed data from ReportModel
-            let processInfo = data.processName ?? "Unknown"
-            let windowTitle = data.windowTitle
-            let mediaInfo = data.hasMediaInfo ? 
-                "\(data.mediaName ?? "") by \(data.artist ?? "")" : nil
-            
-            // 2. Format and send to your service
-            try await sendToMyService(
-                process: processInfo,
-                window: windowTitle,
-                media: mediaInfo,
-                timestamp: data.timeStamp
-            )
-            
-            return .success(())
-        } catch {
-            return .failure(.networkError(error.localizedDescription))
-        }
-    }
-}
-```
-
-### Step 2: Add Configuration
-
-Add configuration properties to `PreferencesDataModel`:
-
-```swift
-// In PreferencesDataModel+Integrations.swift
-extension PreferencesDataModel {
-    struct MyCustomIntegration: Codable {
-        var isEnabled: Bool = false
-        var apiEndpoint: String = ""
-        var apiKey: String = ""
-        // Add other configuration fields
-    }
-    
-    @Observable(key: "myCustomIntegration")
-    static var myCustomIntegration = MyCustomIntegration()
-}
-```
-
-### Step 3: Register Extension
-
-Register your extension in `Reporter.initializeExtensions()`:
-
-```swift
-private func initializeExtensions() {
-    let extensions: [ReporterExtension] = [
-        MixSpaceReporterExtension(),
-        S3ReporterExtension(),
-        SlackReporterExtension(),
-        MyCustomReporterExtension(), // Add your extension here
-    ]
-    
-    for ext in extensions {
-        registerExtension(ext)
-    }
-}
-```
-
-### Step 4: Create Preferences UI (Optional)
-
-Create a view controller for configuration in the Preferences window:
-
-```swift
-class MyCustomIntegrationViewController: NSViewController {
-    // UI elements for configuration
-    @IBOutlet weak var enabledCheckbox: NSButton!
-    @IBOutlet weak var endpointTextField: NSTextField!
-    @IBOutlet weak var apiKeyTextField: NSSecureTextField!
-    
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        loadConfiguration()
-    }
-    
-    private func loadConfiguration() {
-        let config = PreferencesDataModel.shared.myCustomIntegration.value
-        enabledCheckbox.state = config.isEnabled ? .on : .off
-        endpointTextField.stringValue = config.apiEndpoint
-        apiKeyTextField.stringValue = config.apiKey
-    }
-    
-    @IBAction func saveConfiguration(_ sender: Any) {
-        var config = PreferencesDataModel.shared.myCustomIntegration.value
-        config.isEnabled = enabledCheckbox.state == .on
-        config.apiEndpoint = endpointTextField.stringValue
-        config.apiKey = apiKeyTextField.stringValue
-        
-        PreferencesDataModel.shared.myCustomIntegration.value = config
-        AppDelegate.shared.savePreferences()
-    }
-}
-```
-
-### Best Practices
-
-1. **Error Handling**: Always return appropriate `ReporterError` types
-   - Use `.ignored` when the extension is disabled
-   - Use `.networkError()` for connectivity issues
-   - Use `.ratelimitExceeded()` when hitting API limits
-
-2. **Async Operations**: The `onSend` handler is async, use it for:
-   - Network requests
-   - File I/O operations
-   - Database operations
-
-3. **Configuration**: Store sensitive data securely:
-   ```swift
-   // Use Keychain for API keys
-   KeychainHelper.save(key: "myservice_api_key", value: apiKey)
-   ```
-
-4. **Rate Limiting**: Implement rate limiting if needed:
-   ```swift
-   private var lastSentTime: Date?
-   private let minInterval: TimeInterval = 60 // 1 minute
-   
-   func sendData(_ data: ReportModel) async -> Result<Void, ReporterError> {
-       if let lastTime = lastSentTime,
-          Date().timeIntervalSince(lastTime) < minInterval {
-           return .failure(.ratelimitExceeded("Too many requests"))
-       }
-       // ... send data ...
-       lastSentTime = Date()
-   }
-   ```
-
-5. **Data Privacy**: Be mindful of user privacy:
-   - Don't send sensitive window titles
-   - Allow users to configure what data is sent
-   - Implement data filtering/redaction if needed
-
-### Testing Your Extension
-
-1. **Unit Testing**:
-   ```swift
-   func testExtensionSendsData() async {
-       let extension = MyCustomReporterExtension()
-       let options = extension.createReporterOptions()
-       
-       let testData = ReportModel(
-           windowInfo: FocusedWindowInfo(
-               appName: "TestApp",
-               icon: nil,
-               applicationIdentifier: "com.test.app"
-           ),
-           integrations: [],
-           mediaInfo: nil
-       )
-       
-       let result = await options.onSend(testData)
-       XCTAssertTrue(result.isSuccess)
-   }
-   ```
-
-2. **Integration Testing**:
-   - Test with real Reporter instance
-   - Verify data is sent correctly
-   - Test error scenarios
-
-3. **Manual Testing**:
-   - Enable extension in preferences
-   - Monitor console logs for errors
-   - Verify data appears in your service
-
-### Debugging
-
-Enable debug logging in your extension:
-
-```swift
-private func log(_ message: String) {
-    #if DEBUG
-    NSLog("[MyCustomIntegration] \(message)")
-    #endif
-}
-```
-
-Monitor the Reporter's status updates:
-- Check the menu bar icon for sync status
-- Look for errors in Console.app
-- Use breakpoints in your `onSend` handler
+If the component only uploads or resolves application icons, implement `AssetHostingService` instead.

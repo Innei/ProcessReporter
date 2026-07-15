@@ -21,6 +21,7 @@ protocol ReporterExtension {
     func register(to reporter: Reporter)
     func unregister(from reporter: Reporter)
     func clearReportedState()
+    func waitForPendingCleanup(until deadline: ContinuousClock.Instant) async
     func createReporterOptions() -> ReporterOptions
 }
 
@@ -35,4 +36,6 @@ extension ReporterExtension {
     }
 
     func clearReportedState() {}
+
+    func waitForPendingCleanup(until deadline: ContinuousClock.Instant) async {}
 }
