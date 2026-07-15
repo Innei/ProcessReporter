@@ -34,7 +34,7 @@ flowchart LR
   end
 
   subgraph Presentation
-    MENU["Menu Bar Popover"]
+    MENU["Native Menu Bar Menu"]
     SETTINGS["SwiftUI Settings"]
     HISTORY["Sync History"]
   end
@@ -122,7 +122,7 @@ Sleep stops monitoring sources, timers, preparation, and delivery. Wake recreate
 Live presentation uses `PresenceDestinationDeliveryResult` and a separate `PresenceAssetResolution`. Aggregate status combines:
 
 - Onboarding and sharing state.
-- Network waiting as an internal runtime reason and Popover notice; the visible aggregate remains Degraded or Error according to delivery impact.
+- Network waiting as an internal runtime reason and native menu status item; the visible aggregate remains Degraded or Error according to delivery impact.
 - Per-destination sending, success, failure, and skipped state.
 - Independent asset degradation.
 

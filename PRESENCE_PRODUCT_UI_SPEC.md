@@ -3,12 +3,12 @@
 | 字段 | 内容 |
 | --- | --- |
 | 文档状态 | Approved for implementation |
-| 版本 | 1.0 |
-| 日期 | 2026-07-15 |
+| 版本 | 1.1 |
+| 日期 | 2026-07-16 |
 | 产品形态 | Apple Silicon (`arm64`) 上的 macOS 15+ 菜单栏应用 |
-| 主要入口 | Menu Bar Popover |
+| 主要入口 | 原生 Menu Bar `NSMenu` |
 | 次要入口 | Settings Window |
-| 实现边界 | AppKit 管理应用生命周期、`NSStatusItem`、`NSPopover` 与 `NSWindow`；SwiftUI 承载新界面内容 |
+| 实现边界 | AppKit 管理应用生命周期、`NSStatusItem`、`NSMenu` 与 `NSWindow`；SwiftUI 承载 Settings 内容 |
 
 ## 1. 文档目的
 
@@ -22,11 +22,11 @@
 | --- | --- |
 | 产品定位 | 面向单个用户的个人 Presence／状态同步工具 |
 | 核心任务 | 采集用户当前应用、窗口和媒体状态，经隐私规则处理后同步至外部目的地 |
-| 主入口 | 菜单栏 Popover，用于查看当前状态、暂停／恢复共享和检查目的地健康度 |
+| 主入口 | 原生菜单栏菜单，用于查看当前状态、暂停／恢复共享、添加当前应用规则和检查目的地健康度 |
 | Settings 定位 | 低频配置、隐私规则、目的地管理、同步审计和诊断 |
 | S3 定位 | Application Icon Hosting；提供可公开访问的应用图标 URL，不是 Presence Destination |
 | History 定位 | 本地同步审计记录，不是活动统计或生产力分析 |
-| UI 技术方向 | 保留 AppKit 生命周期和窗口控制，使用 SwiftUI 重建 Popover 与 Settings 内容 |
+| UI 技术方向 | 使用原生 AppKit 菜单承载高频状态与命令，SwiftUI 承载 Settings 内容 |
 | 视觉方向 | Native Presence Utility：原生、克制、紧凑、状态优先 |
 
 ## 3. 产品定义
@@ -130,7 +130,7 @@ flowchart LR
 
 ### 6.1 全局状态
 
-| 状态 | 触发条件 | 菜单栏语义 | Popover 主文案 |
+| 状态 | 触发条件 | 菜单栏语义 | 菜单状态文案 |
 | --- | --- | --- | --- |
 | Setup Required | 尚无可用目的地，或 onboarding 未完成 | 中性、未配置 | `Finish Setup` |
 | Paused | 用户关闭 `Share Presence` | 中性暂停 | `Presence sharing is paused` |
@@ -141,7 +141,7 @@ flowchart LR
 
 状态聚合优先级：安全或持久化错误 > 用户暂停 > 正在同步 > 全部失败 > 部分失败 > 正常。
 
-网络离线不是独立的视觉状态。它根据实际影响聚合为 Degraded 或 Error，并在 Popover 中显示 `Waiting for network`。
+网络离线不是独立的视觉状态。它根据实际影响聚合为 Degraded 或 Error，并在菜单中显示 `Waiting for network`。
 
 没有 Ready Destination 时，`Share Presence` 必须显示为关闭且不可启用，并提供 `Set Up a Destination…`。禁用最后一个 Ready Destination 时，界面应在保存前明确提示“Presence sharing will stop”，确认后同时关闭全局共享，避免出现开关已开启但没有任何实际接收方的伪运行状态。
 
@@ -154,7 +154,7 @@ flowchart LR
 | Configuration State | Not Configured、Disabled、Ready、Invalid |
 | Delivery State | Never Sent、Sending、Succeeded、Failed、Skipped |
 
-设置页面优先展示 Configuration State；Popover 优先展示最近一次 Delivery State。不得用一次网络失败把配置标记为 Invalid。
+设置页面优先展示 Configuration State；菜单优先展示最近一次 Delivery State。不得用一次网络失败把配置标记为 Invalid。
 
 ### 6.3 Asset Hosting 状态
 
@@ -170,11 +170,12 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-  STATUS["Menu Bar Status Item"] --> POPOVER["Presence Popover"]
-  POPOVER --> TOGGLE["Pause / Resume"]
-  POPOVER --> NOW["Current Presence"]
-  POPOVER --> HEALTH["Destination Health"]
-  POPOVER --> SETTINGS["Settings Window"]
+  STATUS["Menu Bar Status Item"] --> MENU["Native Presence Menu"]
+  MENU --> TOGGLE["Pause / Resume"]
+  MENU --> NOW["Current Presence"]
+  MENU --> RULE["Add / Edit Current App Rule"]
+  MENU --> HEALTH["Destination Health"]
+  MENU --> SETTINGS["Settings Window"]
 
   SETTINGS --> GENERAL["General"]
   SETTINGS --> DEST["Destinations"]
@@ -200,50 +201,47 @@ flowchart TD
 
 | 操作 | 结果 |
 | --- | --- |
-| 左键单击 | 打开或关闭 Presence Popover |
-| 单击 Popover 外部 | 关闭 Popover |
-| `Esc` | 关闭 Popover |
-| 右键单击 | 打开原生上下文菜单：`Settings…`、`Check for Updates…`、`Quit ProcessReporter` |
+| 单击菜单栏图标 | 打开原生 Presence Menu |
+| 单击菜单外部 | 关闭菜单 |
+| `Esc` | 关闭菜单 |
+| 右键单击 | 使用与主入口一致的原生菜单语义 |
 | `⌘,` | 打开 Settings Window |
 
-### 8.3 Popover 尺寸
+### 8.3 Menu 结构约束
 
-- 固定宽度：372 pt。
-- 内容高度自适应，建议范围 260–620 pt。
-- 超出最大高度时仅中部内容滚动；顶部共享状态和底部操作保持可见。
-- 使用系统 Popover Material，不自绘窗口阴影或背景模糊。
+- 使用系统 `NSMenu` 布局、选中态、键盘导航和 VoiceOver 语义。
+- 不使用自定义 `NSMenuItem.view` 重建卡片、双列状态表或滚动容器。
+- Current Presence 标题应限制长度，避免窗口标题或媒体标题使菜单异常扩宽。
+- 当前应用、窗口和媒体是只读信息项；可执行操作必须使用独立菜单命令。
 
-### 8.4 Popover 结构
+### 8.4 Menu 结构
 
 ```text
-┌──────────────────────────────────┐
-│ Share Presence               [●] │
-│ Sharing is active                │
-├──────────────────────────────────┤
-│ NOW                              │
-│ [App Icon] Xcode                 │
-│            Editing Project       │
-│ [Artwork]  Song — Artist         │
-├──────────────────────────────────┤
-│ DESTINATIONS                     │
-│ [MixSpace] MixSpace     Synced   │
-│ [Slack]    Slack        Synced   │
-│ [Discord]  Discord      Failed › │
-├──────────────────────────────────┤
-│ ⚠ App icon could not be updated  │
-│   Presence was sent without it.  │
-├──────────────────────────────────┤
-│ Settings…                    Quit│
-└──────────────────────────────────┘
+✓ Share Presence
+  Sharing is active
+
+CURRENT PRESENCE
+  [App Icon] Xcode — Editing Project
+  [Artwork]  Playing: Song — Artist
+  Add Rule for Xcode…
+
+DESTINATIONS
+  [MixSpace] MixSpace — Synced
+  [Slack]    Slack — Synced
+  [Discord]  Discord — Failed
+
+Settings…                         ⌘,
+Check for Updates…
+Quit ProcessReporter              ⌘Q
 ```
 
-### 8.5 Header
+### 8.5 Sharing 状态
 
 - 主控件名称固定为 `Share Presence`，不使用 `Enabled` 或 `Reporting Allowed`。
-- Toggle 为即时生效操作。
+- 使用原生勾选菜单项表达开关状态，并即时生效。
 - 关闭后立即取消待发送任务并停止不必要的监控；不得继续更新或显示“当前正在共享”的内容。
-- Paused 状态显示单一恢复操作 `Resume Sharing`。
-- 凭据安全边界不可用时，Toggle 强制关闭且不可启用，并显示可执行的修复说明。
+- Paused 状态保持 `Share Presence` 为未勾选状态，并显示只读状态说明。
+- 凭据安全边界不可用时，该菜单项强制关闭且不可启用，并显示可执行的修复命令。
 
 ### 8.6 Current Presence
 
@@ -256,22 +254,23 @@ flowchart TD
 3. 媒体正在播放时显示 artwork、标题与 artist。
 4. 没有可共享内容时显示 `Nothing to share right now`。
 
-Current Presence 不是编辑器。单击该区域打开 `Privacy & Rules`，并预选当前应用。
+Current Presence 不是编辑器，其应用和媒体项目均不可点击。菜单必须提供独立、对象明确的 `Add Rule for <Application>…` 或 `Edit Rule for <Application>…` 命令；媒体项目不得隐式操作前台应用的规则。
 
 ### 8.7 Destinations
 
 - 仅展示已配置的 MixSpace、Slack 和 Discord。
-- 每行包含 Provider 图标、名称、最近状态和可选的相对时间。
-- 单击失败行打开 Settings 对应目的地详情。
+- 每行包含 Provider 图标、名称和最近状态。
+- 全局同步期间只显示一次 `Syncing presence…`，不得在每个 Ready Destination 上重复相同的 Syncing 文案。
+- 单击目的地项目打开 Settings 对应详情；失败消息可通过项目说明提供。
 - 尚无目的地时显示空状态与主操作 `Set Up a Destination…`。
 - S3 不出现在 Destinations 列表中。
-- 只有图标托管异常影响当前投递时，才以 Inline Notice 形式出现 S3 相关信息。
+- 只有图标托管异常影响当前投递时，才显示 `Review Application Icon Hosting…` 恢复命令。
 
-### 8.8 Footer
+### 8.8 应用命令
 
-- 左侧：`Settings…`。
-- 右侧：`Quit`，使用次级文字按钮。
-- `Check for Updates…` 保留在右键菜单和 Settings > Advanced，不占用常用 Popover 空间。
+- 菜单尾部固定提供 `Settings…`、`Check for Updates…` 和 `Quit ProcessReporter`。
+- `Settings…` 保留 `⌘,`，`Quit ProcessReporter` 保留 `⌘Q`。
+- 这些命令使用原生菜单项，不使用自定义 Footer View。
 
 ## 9. Settings Window 规范
 
@@ -287,7 +286,7 @@ Current Presence 不是编辑器。单击该区域打开 `Privacy & Rules`，并
 | 侧边栏宽度 | 190–210 pt |
 | 内容宽度 | 表单最大可读宽度约 620 pt，宽窗口不无限拉伸字段 |
 | 生命周期 | 关闭 Settings 不退出应用；应用恢复 accessory activation policy |
-| 恢复 | 记住最后访问页面；通过 Popover 深链时覆盖最后页面 |
+| 恢复 | 记住最后访问页面；通过菜单深链时覆盖最后页面 |
 
 设置窗口由 AppKit `NSWindow` 管理，由一个 SwiftUI Root View 作为内容。不得将 UI 重建设计成同时重写应用生命周期、偏好持久化或 Reporter 并发模型的前置条件。
 
@@ -697,41 +696,41 @@ flowchart TD
 - 区块间：16–24 pt。
 - Settings 内容边距：20–24 pt。
 - 普通 Settings 行高：36–40 pt。
-- Popover 状态行高：44–48 pt。
+- 菜单项使用系统行高，不自定义固定高度。
 - macOS 紧凑界面中的普通可点击区域不低于约 32 pt；关键主操作采用更宽松区域。
 
 ### 16.5 Surface
 
 - Settings 使用系统 Window Background 和 Sidebar Material。
-- Popover 使用系统 Popover Material。
-- 只有 Current Presence、严重 Notice 和内容 Preview 使用独立卡片表面。
+- 主入口使用系统 Menu Material、选中态和分隔线。
+- Current Presence 不使用独立卡片表面。
 - 列表主要依赖分组、间距和 separator，不使用大面积 zebra striping。
-- 外层卡片圆角 10–12 pt；内层图标和 artwork 6–8 pt，并保持视觉同心。
+- Settings 卡片圆角 10–12 pt；菜单内不创建卡片。
 - 应用图标、Provider Logo 和 artwork 使用极淡 1 px 等效描边，以保证浅色资产可见。
 
 ### 16.6 Motion
 
-- Popover 仅使用系统打开和关闭动画。
+- 菜单仅使用系统打开和关闭行为。
 - 不对页面初次加载进行 stagger animation。
 - 状态变化使用 120–180 ms opacity 或轻微 scale transition。
-- Syncing 使用系统 `ProgressView` 或克制的 symbol effect。
+- 菜单中的 Syncing 使用静态系统 Symbol 与状态文字，不运行自定义动画。
 - 不使用 bounce、持续脉冲或装饰性旋转。
 - Reduce Motion 启用时直接切换状态。
 
 ## 17. 共享组件
 
-| 组件 | 用途 | Popover | Settings |
+| 组件 | 用途 | Menu | Settings |
 | --- | --- | --- | --- |
-| `PresencePreview` | 显示 sanitized Presence | 是 | 规则与目的地预览 |
-| `DestinationStatusRow` | Provider 与运行状态 | 紧凑 | 可导航详情 |
-| `StatusBadge` | 状态语义 | 是 | 是 |
-| `InlineNotice` | 可执行警告或错误 | 是 | 是 |
+| `CurrentPresenceMenuItem` | 显示 sanitized Presence | 只读 | 否 |
+| `DestinationMenuItem` | Provider 与运行状态 | 可导航 | 可导航详情 |
+| `StatusMenuItem` | 全局状态语义 | 只读 | 是 |
+| `RecoveryMenuItem` | 可执行警告或错误 | 是 | 是 |
 | `ProviderHeader` | Provider 配置头部 | 否 | 是 |
 | `ApplicationRuleRow` | 应用隐私规则摘要 | 否 | 是 |
-| `SyncEventRow` | 审计事件摘要 | 最近一次可复用 | 是 |
+| `SyncEventRow` | 审计事件摘要 | 否 | 是 |
 | `AssetHostingStatusRow` | 图标托管状态 | 仅异常 | 是 |
 | `SettingsSection` | 统一分组、标题和说明 | 否 | 是 |
-| `EmptyState` | 无内容、无配置 | 是 | 是 |
+| `EmptyState` | 无内容、无配置 | 单行状态或命令 | 是 |
 
 组件必须按语义复用，不以单个页面的像素外观为唯一抽象依据。
 
@@ -882,7 +881,7 @@ protocol PresenceDestination {
 | `Reporter` | `PresenceCoordinator`／Delivery Coordinator | 分阶段抽取，不要求 UI 阶段一次重写全部监控逻辑 |
 | `ReporterExtension` | `PresenceDestination` | 仅 MixSpace、Slack、Discord 继续实现 |
 | `S3ReporterExtension` | `S3AssetHostingService` | 从发送 registry 移除，保留现有 fingerprint 与 URL cache 能力 |
-| `ReporterStatusItemManager` | `MenuBarController` | `NSMenu` 改为 `NSPopover` + SwiftUI content；保留右键原生菜单 |
+| `ReporterStatusItemManager` | `MenuBarController` | 保留原生 `NSMenu`，使用 Presence 状态模型重建只读信息项和明确命令 |
 | `SettingWindow` | Settings Window Host | 增加 resize、frame 恢复和 SwiftUI Root View |
 | `PreferencesFilterViewController` | Privacy & Rules | 将两个过滤列表迁移为应用规则 |
 | `PreferencesMappingViewController` | Advanced > Legacy Mappings | 不再是一级页面 |
@@ -961,12 +960,12 @@ ProcessReporter/
 
 完成条件：现有 UI 行为不回归，新状态模型可通过行为测试验证。
 
-### Phase 2：Menu Bar Popover
+### Phase 2：Native Menu Bar Menu
 
 - 新 Menu Bar Template Image。
-- `NSPopover` 与 SwiftUI Presence 内容。
-- 全局状态、Current Presence、Destination rows 和 error recovery。
-- 右键原生上下文菜单。
+- 原生 `NSMenu` Presence 内容。
+- 全局状态、只读 Current Presence、明确的 Rule 命令、Destination rows 和 error recovery。
+- 移除主入口的 `NSPopover` 与 SwiftUI Card 交互。
 
 完成条件：不打开 Settings 即可完成日常状态确认和暂停／恢复。
 
@@ -1012,7 +1011,7 @@ ProcessReporter/
 
 ### 27.2 UI 行为验证
 
-- Popover 打开、关闭、键盘操作和状态切换。
+- Menu 打开、关闭、键盘操作、Rule 深链和状态切换。
 - Settings 窗口 resize、frame 恢复、页面深链和未保存草稿保护。
 - Accessibility 权限未授权、授权和撤销后的实时状态。
 - Destination Test 不隐式保存草稿。
@@ -1042,7 +1041,8 @@ ProcessReporter/
 ### 28.2 Menu Bar
 
 - [ ] 用户单击菜单栏图标后可立即判断是否正在共享、共享什么以及各目的地是否正常。
-- [ ] 用户可在 Popover 内暂停或恢复共享。
+- [ ] 用户可在原生菜单内暂停或恢复共享。
+- [ ] Current Presence 信息项不可点击；添加或编辑规则使用目标应用名称明确的独立命令。
 - [ ] 失败状态提供直接、可执行的详情入口。
 - [ ] 菜单栏图标是产品专属 Template Image，并可无颜色区分主要状态。
 
@@ -1080,9 +1080,9 @@ ProcessReporter/
 | --- | --- |
 | S3 是否删除 | 否；保留并重构为 Asset Hosting |
 | S3 是否仍为 Provider | 否；它不是 Presence Destination |
-| 主入口使用 NSMenu 还是 Popover | 使用 SwiftUI Popover；右键保留原生上下文菜单 |
+| 主入口使用 NSMenu 还是 Popover | 使用原生 `NSMenu`；Current Presence 为只读项，Rule 使用独立命令 |
 | Settings 使用顶部 Toolbar 还是 Sidebar | 使用 Sidebar |
 | Filter 与 Mapping 是否保留一级页面 | 否；普通能力合并到 Privacy & Rules，原始 Mapping 移入 Advanced |
 | History 是否保留 | 保留，但定义为本地同步审计 |
 | 是否展示 Raw Snapshot | 否；UI、History 和 Preview 只使用 sanitized Presence |
-| 是否全面重写 AppKit 架构 | 否；采用 AppKit Host + SwiftUI Content 的渐进迁移 |
+| 是否全面重写 AppKit 架构 | 否；采用 AppKit Menu + SwiftUI Settings 的渐进边界 |

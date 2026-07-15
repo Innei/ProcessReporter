@@ -7,7 +7,6 @@
 
 import Cocoa
 import Combine
-import SwiftUI
 
 @MainActor
 final class ReporterStatusItemManager: NSObject {
@@ -22,20 +21,30 @@ final class ReporterStatusItemManager: NSObject {
 
     private let statusItem: NSStatusItem
     private let model = PresenceMenuBarModel()
-    private let popover = NSPopover()
-    private let contextMenu = NSMenu()
+    private let menu = NSMenu()
+    private var menuActions: PresenceMenuBuilder.Actions!
 
-    private var hostingController: NSHostingController<PresencePopoverView>!
     private var aggregateStatusObservation: AnyCancellable?
     private var renderedStatus: PresenceAggregateStatus?
 
     override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
+        let actionTarget = MenuActionTarget(owner: self)
+        menuActions = PresenceMenuBuilder.Actions(
+            target: actionTarget,
+            toggleSharing: #selector(MenuActionTarget.toggleSharing(_:)),
+            openPrivacyRule: #selector(MenuActionTarget.openPrivacyRule(_:)),
+            openDestinations: #selector(MenuActionTarget.openDestinations(_:)),
+            openDestination: #selector(MenuActionTarget.openDestination(_:)),
+            openIconHosting: #selector(MenuActionTarget.openIconHosting(_:)),
+            openSettings: #selector(MenuActionTarget.openSettings(_:)),
+            checkForUpdates: #selector(MenuActionTarget.checkForUpdates(_:)),
+            quit: #selector(MenuActionTarget.quit(_:))
+        )
 
         configureStatusItem()
-        configurePopover()
-        configureContextMenu()
+        configureMenu()
         observeAggregateStatus()
         applyStatusItemAppearance(model.aggregateStatus)
     }
@@ -46,7 +55,9 @@ final class ReporterStatusItemManager: NSObject {
     }
 
     func beginDelivery(to destinationIDs: [PresenceDestinationID]) -> UUID {
-        model.beginDelivery(to: destinationIDs)
+        let deliveryID = model.beginDelivery(to: destinationIDs)
+        rebuildMenu()
+        return deliveryID
     }
 
     func completeDelivery(
@@ -61,14 +72,17 @@ final class ReporterStatusItemManager: NSObject {
             assetResolution: assetResolution,
             persistenceError: persistenceError
         )
+        rebuildMenu()
     }
 
     func publishCurrentPresence(_ report: ReportModel) {
         model.publishCurrentPresence(report)
+        rebuildMenu()
     }
 
     func clearCurrentPresence() {
         model.clearCurrentPresence()
+        rebuildMenu()
     }
 
     func toggleStatusItemIcon(_ status: StatusItemIconStatus) {
@@ -87,82 +101,29 @@ final class ReporterStatusItemManager: NSObject {
             // phase, but they must not overwrite destination-aware state.
             break
         }
+        rebuildMenu()
     }
 
     private func configureStatusItem() {
         guard let button = statusItem.button else { return }
-        button.target = self
-        button.action = #selector(statusItemPressed(_:))
-        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         button.imagePosition = .imageOnly
         button.imageScaling = .scaleProportionallyDown
         button.setAccessibilityRole(.button)
     }
 
-    private func configurePopover() {
-        let actions = PresencePopoverActions(
-            openSettings: { [weak self] in
-                self?.openSettings()
-            },
-            openPrivacyRules: { [weak self] applicationIdentifier in
-                self?.openSettings(
-                    route: .privacyRules(applicationIdentifier: applicationIdentifier)
-                )
-            },
-            openDestinations: { [weak self] in
-                self?.openSettings(route: .section(.destinations))
-            },
-            openDestination: { [weak self] destinationID in
-                self?.openSettings(route: .destination(destinationID.settingsDestination))
-            },
-            openIconHosting: { [weak self] in
-                self?.openSettings(route: .destination(.applicationIconHosting))
-            },
-            dismiss: { [weak self] in
-                self?.popover.performClose(nil)
-            },
-            quit: { [weak self] in
-                self?.popover.performClose(nil)
-                NSApp.terminate(nil)
-            }
-        )
-        let rootView = PresencePopoverView(model: model, actions: actions)
-        hostingController = NSHostingController(rootView: rootView)
-        hostingController.sizingOptions = [.preferredContentSize]
-
-        popover.behavior = .transient
-        popover.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        popover.delegate = self
-        popover.contentSize = NSSize(width: 372, height: 420)
-        popover.contentViewController = hostingController
+    private func configureMenu() {
+        menu.autoenablesItems = false
+        menu.delegate = self
+        statusItem.menu = menu
+        rebuildMenu()
     }
 
-    private func configureContextMenu() {
-        let settingsItem = NSMenuItem(
-            title: "Settings…",
-            action: #selector(showSettingsFromMenu(_:)),
-            keyEquivalent: ","
+    private func rebuildMenu() {
+        PresenceMenuBuilder.rebuild(
+            menu,
+            model: model,
+            actions: menuActions
         )
-        settingsItem.target = self
-        contextMenu.addItem(settingsItem)
-
-        let updateItem = NSMenuItem(
-            title: "Check for Updates…",
-            action: #selector(checkForUpdates(_:)),
-            keyEquivalent: ""
-        )
-        updateItem.target = self
-        contextMenu.addItem(updateItem)
-
-        contextMenu.addItem(.separator())
-
-        let quitItem = NSMenuItem(
-            title: "Quit ProcessReporter",
-            action: #selector(NSApplication.terminate(_:)),
-            keyEquivalent: "q"
-        )
-        quitItem.target = NSApp
-        contextMenu.addItem(quitItem)
     }
 
     private func observeAggregateStatus() {
@@ -184,42 +145,44 @@ final class ReporterStatusItemManager: NSObject {
             "ProcessReporter, \(status.accessibilityDescription)"
         )
         button.setAccessibilityValue(status.displayText)
-        button.setAccessibilityHelp("Open Presence status")
+        button.setAccessibilityHelp("Open Presence menu")
         button.toolTip = "ProcessReporter — \(status.displayText)"
     }
 
-    @objc private func statusItemPressed(_ sender: NSStatusBarButton) {
-        guard let event = NSApp.currentEvent else {
-            togglePopover(relativeTo: sender)
-            return
-        }
-
-        if event.type == .rightMouseUp
-            || (event.type == .leftMouseUp && event.modifierFlags.contains(.control))
-        {
-            popover.performClose(nil)
-            NSMenu.popUpContextMenu(contextMenu, with: event, for: sender)
-            return
-        }
-
-        togglePopover(relativeTo: sender)
+    @objc private func toggleSharing(_ sender: NSMenuItem) {
+        model.setSharing(!model.isSharing)
+        rebuildMenu()
     }
 
-    private func togglePopover(relativeTo button: NSStatusBarButton) {
-        if popover.isShown {
-            popover.performClose(nil)
+    @objc private func openPrivacyRule(_ sender: NSMenuItem) {
+        guard let applicationIdentifier = sender.representedObject as? String else {
             return
         }
+        openSettings(
+            route: .privacyRules(applicationIdentifier: applicationIdentifier)
+        )
+    }
 
-        model.refreshConfiguration()
-        popover.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        popover.contentViewController?.view.window?.makeKey()
+    @objc private func openDestinations(_ sender: NSMenuItem) {
+        openSettings(route: .section(.destinations))
+    }
+
+    @objc private func openDestination(_ sender: NSMenuItem) {
+        guard let rawValue = sender.representedObject as? String,
+              let destinationID = PresenceDestinationID(rawValue: rawValue)
+        else {
+            return
+        }
+        openSettings(route: .destination(destinationID.settingsDestination))
+    }
+
+    @objc private func openIconHosting(_ sender: NSMenuItem) {
+        openSettings(route: .destination(.applicationIconHosting))
     }
 
     private func openSettings(route: SettingsRoute? = nil) {
-        popover.performClose(nil)
-        DispatchQueue.main.async {
+        Task { @MainActor in
+            await Task.yield()
             SettingWindowManager.shared.showWindow(route: route)
         }
     }
@@ -231,11 +194,53 @@ final class ReporterStatusItemManager: NSObject {
     @objc private func checkForUpdates(_ sender: Any?) {
         (NSApp.delegate as? AppDelegate)?.checkForUpdates(sender)
     }
+
+    @MainActor
+    private final class MenuActionTarget: NSObject {
+        unowned let owner: ReporterStatusItemManager
+
+        init(owner: ReporterStatusItemManager) {
+            self.owner = owner
+        }
+
+        @objc func toggleSharing(_ sender: NSMenuItem) {
+            owner.toggleSharing(sender)
+        }
+
+        @objc func openPrivacyRule(_ sender: NSMenuItem) {
+            owner.openPrivacyRule(sender)
+        }
+
+        @objc func openDestinations(_ sender: NSMenuItem) {
+            owner.openDestinations(sender)
+        }
+
+        @objc func openDestination(_ sender: NSMenuItem) {
+            owner.openDestination(sender)
+        }
+
+        @objc func openIconHosting(_ sender: NSMenuItem) {
+            owner.openIconHosting(sender)
+        }
+
+        @objc func openSettings(_ sender: Any?) {
+            owner.showSettingsFromMenu(sender)
+        }
+
+        @objc func checkForUpdates(_ sender: Any?) {
+            owner.checkForUpdates(sender)
+        }
+
+        @objc func quit(_ sender: Any?) {
+            NSApp.terminate(sender)
+        }
+    }
 }
 
-extension ReporterStatusItemManager: NSPopoverDelegate {
-    func popoverDidClose(_ notification: Notification) {
-        statusItem.button?.highlight(false)
+extension ReporterStatusItemManager: NSMenuDelegate {
+    func menuWillOpen(_ menu: NSMenu) {
+        model.refreshConfiguration()
+        rebuildMenu()
     }
 }
 

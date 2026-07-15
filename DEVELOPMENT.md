@@ -52,7 +52,7 @@ ProcessReporter/
 │   ├── Domain/                UI and Sync Event value models
 │   └── Policy/                Privacy rules and sanitized evaluation
 ├── Features/
-│   ├── MenuBar/               Primary operational popover
+│   ├── MenuBar/               Native status menu presentation
 │   ├── Onboarding/            First-run Presence setup
 │   └── Settings/              General, destinations, privacy, history, advanced
 ├── Preferences/DataModels/    Persisted compatibility models and relays
@@ -60,7 +60,7 @@ ProcessReporter/
 └── AppDelegate.swift          Application lifecycle and bounded shutdown
 ```
 
-AppKit owns the application, status item, popover host, and Settings window. SwiftUI owns product content. Do not move lifecycle ownership into SwiftUI as part of a page-level change.
+AppKit owns the application, status item, native menu, and Settings window. SwiftUI owns Settings and onboarding content. Do not move lifecycle ownership into SwiftUI as part of a page-level change.
 
 ## Presence pipeline
 

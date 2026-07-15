@@ -32,16 +32,16 @@ Accessibility permission is required only for Window Titles. ProcessReporter req
 
 ## Menu Bar
 
-Select the menu bar icon to open the Presence popover.
+Select the menu bar icon to open the native Presence menu.
 
-| Area | Purpose |
+| Menu area | Purpose |
 | --- | --- |
 | Global status | Shows setup required, paused, syncing, ready, degraded, or failed |
 | Current Presence | Shows the sanitized application and media currently eligible for sharing |
 | Destinations | Shows the latest result for MixSpace, Slack, and Discord |
-| Inline notices | Explains network waiting, destination failures, or icon-hosting degradation |
+| Recovery commands | Opens the relevant Settings page for destination, credential, or icon-hosting failures |
 
-Select **Current Presence** to open **Privacy & Rules** for the current application. Use the right-click menu for Settings, update checks, and Quit.
+Current application and media items are read-only. Use **Add Rule for _Application_…** or **Edit Rule for _Application_…** to open **Privacy & Rules** for the named application. The menu also contains Settings, update checks, and Quit.
 
 ## Settings
 
@@ -161,7 +161,7 @@ S3 configuration alone does not satisfy the destination requirement.
 
 ### Status says Waiting for Network
 
-The popover retains the current sanitized presentation and displays a **Waiting for network** notice. The aggregate indicator becomes Degraded when a prior successful destination result exists, otherwise Error. No report is queued while offline; after connectivity returns, ProcessReporter captures and sanitizes the latest Presence again before delivery.
+The menu retains the current sanitized presentation and displays **Waiting for network**. The aggregate indicator becomes Degraded when a prior successful destination result exists, otherwise Error. No report is queued while offline; after connectivity returns, ProcessReporter captures and sanitizes the latest Presence again before delivery.
 
 ### Application icon upload fails
 

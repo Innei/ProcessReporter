@@ -67,7 +67,7 @@ S3-compatible storage is asset infrastructure, not a Presence destination. A hos
 | Sync History | Local audit of sanitized delivery attempts |
 | Advanced | Reporting engine, mappings, storage, backup, updates, and diagnostics |
 
-The menu bar popover is the primary operational interface. Settings is intended for configuration and audit rather than continuous activity browsing.
+The native menu bar menu is the primary operational interface. Settings is intended for configuration and audit rather than continuous activity browsing.
 
 ## Development
 

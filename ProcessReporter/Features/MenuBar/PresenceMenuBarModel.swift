@@ -11,7 +11,6 @@ final class PresenceMenuBarModel: ObservableObject {
     @Published private(set) var privacyTargetApplicationIdentifier: String?
     @Published private(set) var destinations: [PresenceDestinationPresentation] = []
     @Published private(set) var assetResolution: PresenceAssetResolution = .notRequested
-    @Published private(set) var lastSentAt: Date?
     @Published private(set) var blockingMessage: String?
 
     private var runtimeStatus: PresenceRuntimeStatus = .ready
@@ -104,13 +103,6 @@ final class PresenceMenuBarModel: ObservableObject {
         // audit result, but it must not clear the newer runtime reason.
         if runtimeStatus == .syncing {
             transitionRuntimeStatus(to: .ready)
-        }
-
-        if let latestSuccess = results.compactMap({ result -> Date? in
-            if case .succeeded(let date) = result.state { return date }
-            return nil
-        }).max() {
-            lastSentAt = latestSuccess
         }
 
         rebuildDestinations()
