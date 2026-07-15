@@ -48,12 +48,17 @@ jobs:
             exit 1
           fi
 
-          if [[ "$(git cat-file -t "refs/tags/$TAG")" != "tag" ]]; then
+          # actions/checkout resolves a tag-triggered run to GITHUB_SHA and may
+          # replace the local tag ref with that commit. Fetch the remote tag into
+          # an isolated ref so the annotated tag object remains observable.
+          REMOTE_TAG_REF="refs/processreporter-release-tags/$TAG"
+          git fetch --no-tags origin "refs/tags/$TAG:$REMOTE_TAG_REF"
+          if [[ "$(git cat-file -t "$REMOTE_TAG_REF")" != "tag" ]]; then
             echo "Release tags must be annotated tags." >&2
             exit 1
           fi
           git fetch --no-tags origin main
-          TAG_COMMIT="$(git rev-list -n 1 "$TAG")"
+          TAG_COMMIT="$(git rev-list -n 1 "$REMOTE_TAG_REF")"
           if ! git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then
             echo "Release tag must point to a commit contained in origin/main." >&2
             exit 1
