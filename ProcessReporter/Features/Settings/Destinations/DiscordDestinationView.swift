@@ -4,6 +4,7 @@ struct DiscordDestinationView: View {
     @ObservedObject var store: SettingsStore
     let onTest: () -> Void
     let onSave: () -> Void
+    var onBack: (() -> Void)? = nil
 
     var body: some View {
         DestinationEditorLayout(
@@ -16,7 +17,8 @@ struct DiscordDestinationView: View {
             testTitle: "Publish Test Activity…",
             onTest: onTest,
             onDiscard: { store.discardDestinationDraft(.discord) },
-            onSave: onSave
+            onSave: onSave,
+            onBack: onBack
         ) {
             DestinationFormRow(
                 "Application ID",

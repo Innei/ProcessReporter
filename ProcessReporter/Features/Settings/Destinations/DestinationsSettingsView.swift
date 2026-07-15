@@ -5,20 +5,24 @@ struct DestinationsSettingsView: View {
 
     var body: some View {
         NavigationStack(path: $store.destinationPath) {
-            List {
-                Section("Presence Destinations") {
-                    destinationLink(.mixSpace)
-                    destinationLink(.slack)
-                    destinationLink(.discord)
+            SettingsPage(
+                "Destinations",
+                subtitle: "Choose where Presence is delivered and how public icon URLs are hosted."
+            ) {
+                SettingsGroup("Presence Destinations") {
+                    destinationButton(.mixSpace)
+                    SettingsDivider()
+                        .padding(.leading, 48)
+                    destinationButton(.slack)
+                    SettingsDivider()
+                        .padding(.leading, 48)
+                    destinationButton(.discord)
                 }
 
-                Section("Resources") {
-                    destinationLink(.applicationIconHosting)
+                SettingsGroup("Resources") {
+                    destinationButton(.applicationIconHosting)
                 }
             }
-            .listStyle(.inset)
-            .navigationTitle("Destinations")
-            .navigationSubtitle("Choose where Presence is delivered and how public icon URLs are hosted.")
             .navigationDestination(for: SettingsDestination.self) { destination in
                 DestinationDetailView(destination: destination, store: store)
             }
@@ -28,17 +32,17 @@ struct DestinationsSettingsView: View {
         }
     }
 
-    private func destinationLink(_ destination: SettingsDestination) -> some View {
+    private func destinationButton(_ destination: SettingsDestination) -> some View {
         let status = store.configurationStatus(for: destination)
-        return NavigationLink(value: destination) {
+        return Button(action: { openDestination(destination) }) {
             HStack(spacing: 12) {
                 Image(nsImage: destination.image)
                     .resizable()
                     .scaledToFit()
-                    .frame(width: 34, height: 34)
-                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .frame(width: 38, height: 38)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     .overlay {
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .stroke(Color(nsColor: .separatorColor).opacity(0.8), lineWidth: 1)
                     }
                     .accessibilityHidden(true)
@@ -75,10 +79,21 @@ struct DestinationsSettingsView: View {
                             .foregroundStyle(.tertiary)
                     }
                 }
+
+                Image(systemName: "chevron.forward")
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
             }
-            .padding(.vertical, 5)
+            .padding(14)
+            .contentShape(Rectangle())
             .accessibilityElement(children: .combine)
         }
+        .buttonStyle(.plain)
+        .accessibilityHint("Open \(destination.title) settings.")
+    }
+
+    private func openDestination(_ destination: SettingsDestination) {
+        store.navigate(to: .destination(destination))
     }
 }
 
@@ -93,21 +108,9 @@ private struct DestinationDetailView: View {
     @State private var leaveAfterSaving = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Button("Destinations", systemImage: "chevron.left", action: requestBack)
-                    .disabled(store.destinationBusy != nil)
-                Spacer()
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 10)
-            .background(.bar)
-
-            Divider()
-            destinationEditor
-        }
-        .navigationBarBackButtonHidden(true)
-        .confirmationDialog(
+        destinationEditor
+            .navigationBarBackButtonHidden(true)
+            .confirmationDialog(
                 "Save Changes Before Leaving?",
                 isPresented: $showingLeaveConfirmation,
                 titleVisibility: .visible
@@ -174,26 +177,30 @@ private struct DestinationDetailView: View {
             MixSpaceDestinationView(
                 store: store,
                 onTest: { showingTestConfirmation = true },
-                onSave: { requestSave() }
+                onSave: { requestSave() },
+                onBack: requestBack
             )
         case .slack:
             SlackDestinationView(
                 store: store,
                 onTest: { showingTestConfirmation = true },
-                onSave: { requestSave() }
+                onSave: { requestSave() },
+                onBack: requestBack
             )
         case .discord:
             DiscordDestinationView(
                 store: store,
                 onTest: { showingTestConfirmation = true },
-                onSave: { requestSave() }
+                onSave: { requestSave() },
+                onBack: requestBack
             )
         case .applicationIconHosting:
             S3DestinationView(
                 store: store,
                 onTest: { showingTestConfirmation = true },
                 onSave: { requestSave() },
-                onClearCache: { showingClearCacheConfirmation = true }
+                onClearCache: { showingClearCacheConfirmation = true },
+                onBack: requestBack
             )
         }
     }

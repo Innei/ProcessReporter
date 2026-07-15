@@ -75,6 +75,9 @@
     "Cancel" : {
 
     },
+    "Cancel Replacement" : {
+
+    },
     "Check for Updates…" : {
 
     },
@@ -147,6 +150,9 @@
     "Credential will be removed when saved" : {
 
     },
+    "Credential not saved. Choose Save Changes below to store it." : {
+
+    },
     "Delete" : {
 
     },
@@ -160,6 +166,9 @@
 
     },
     "Discard Changes" : {
+
+    },
+    "Discards the replacement and continues using the stored credential." : {
 
     },
     "Display Alias" : {
@@ -235,9 +244,6 @@
 
     },
     "Inspect the sanitized Presence and delivery results." : {
-
-    },
-    "Keep Stored Credential" : {
 
     },
     "Last %arg ·" : {
@@ -402,6 +408,9 @@
     "Request Accessibility Access…" : {
 
     },
+    "Replacement not saved. Choose Save Changes below to apply it." : {
+
+    },
     "Request Method" : {
 
     },
@@ -463,6 +472,9 @@
 
     },
     "Save and Stop Sharing" : {
+
+    },
+    "Saves configuration and pending credential changes." : {
 
     },
     "Search application rules" : {
@@ -553,6 +565,9 @@
 
     },
     "This change disables the last ready destination and will turn off global Presence sharing." : {
+
+    },
+    "This value is not stored until Save Changes is selected." : {
 
     },
     "This destination has an unsaved draft. Save or discard it before returning to the destination list." : {

@@ -221,33 +221,17 @@ class DiscordReporterExtension: ReporterExtension {
     /// output receipt derived from the same final payload.
     private static func transportPresence(_ presence: DiscordPresence) -> DiscordPresence {
         DiscordPresence(
-            details: transportString(presence.details),
-            state: transportString(presence.state),
+            details: DiscordTransportContract.text(presence.details),
+            state: DiscordTransportContract.text(presence.state),
             activityType: presence.activityType ?? .playing,
             startTimestamp: presence.startTimestamp,
             endTimestamp: presence.endTimestamp,
-            largeImageKey: transportString(presence.largeImageKey),
-            largeImageText: transportString(presence.largeImageText),
-            smallImageKey: transportString(presence.smallImageKey),
-            smallImageText: transportString(presence.smallImageText),
+            largeImageKey: DiscordTransportContract.assetIdentifier(presence.largeImageKey),
+            largeImageText: DiscordTransportContract.text(presence.largeImageText),
+            smallImageKey: DiscordTransportContract.assetIdentifier(presence.smallImageKey),
+            smallImageText: DiscordTransportContract.text(presence.smallImageText),
             buttons: nil
         )
-    }
-
-    private static func transportString(_ value: String?) -> String? {
-        guard let value, !value.isEmpty else { return nil }
-        guard value.utf8.count > 127 else { return value }
-
-        var result = ""
-        var byteCount = 0
-        for character in value {
-            let fragment = String(character)
-            let fragmentByteCount = fragment.utf8.count
-            guard byteCount + fragmentByteCount <= 127 else { break }
-            result.append(character)
-            byteCount += fragmentByteCount
-        }
-        return result.isEmpty ? nil : result
     }
 
     private func recordDebug(

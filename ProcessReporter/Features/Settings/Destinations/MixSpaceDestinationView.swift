@@ -4,6 +4,7 @@ struct MixSpaceDestinationView: View {
     @ObservedObject var store: SettingsStore
     let onTest: () -> Void
     let onSave: () -> Void
+    var onBack: (() -> Void)? = nil
 
     var body: some View {
         DestinationEditorLayout(
@@ -16,7 +17,8 @@ struct MixSpaceDestinationView: View {
             testTitle: "Send Test Presence…",
             onTest: onTest,
             onDiscard: { store.discardDestinationDraft(.mixSpace) },
-            onSave: onSave
+            onSave: onSave,
+            onBack: onBack
         ) {
             DestinationFormRow(
                 "Endpoint",

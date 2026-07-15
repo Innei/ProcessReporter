@@ -6,6 +6,7 @@ struct SlackDestinationView: View {
     @ObservedObject var store: SettingsStore
     let onTest: () -> Void
     let onSave: () -> Void
+    var onBack: (() -> Void)? = nil
 
     private let expirationOptions = [30, 60, 120, 300, 600, 1_800, 3_600]
 
@@ -20,7 +21,8 @@ struct SlackDestinationView: View {
             testTitle: "Set Test Status…",
             onTest: onTest,
             onDiscard: { store.discardDestinationDraft(.slack) },
-            onSave: onSave
+            onSave: onSave,
+            onBack: onBack
         ) {
             DestinationCredentialField(
                 title: "User OAuth Token",

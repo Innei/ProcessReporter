@@ -11,52 +11,63 @@ struct DestinationEditorLayout<Required: View, Content: View, Advanced: View>: V
     let onTest: () -> Void
     let onDiscard: () -> Void
     let onSave: () -> Void
+    var onBack: (() -> Void)? = nil
     @ViewBuilder let required: Required
     @ViewBuilder let content: Content
     @ViewBuilder let advanced: Advanced
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                DestinationEditorHeader(
-                    destination: destination,
-                    status: status,
-                    isEnabled: $isEnabled,
-                    isBusy: isBusy
-                )
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    DestinationEditorHeader(
+                        destination: destination,
+                        status: status,
+                        isEnabled: $isEnabled,
+                        isBusy: isBusy,
+                        onBack: onBack
+                    )
 
-                DestinationEditorSection("Required") {
-                    required
+                    DestinationEditorSection("Required") {
+                        required
+                    }
+                    .disabled(isBusy || status.isLoadingCredentials)
+
+                    DestinationEditorSection("Content / Preview") {
+                        content
+                    }
+                    .disabled(isBusy || status.isLoadingCredentials)
+
+                    DestinationEditorSection("Advanced") {
+                        advanced
+                    }
+                    .disabled(isBusy || status.isLoadingCredentials)
+
+                    if let notice {
+                        DestinationEditorNotice(notice: notice)
+                    }
                 }
-                .disabled(isBusy || status.isLoadingCredentials)
-
-                DestinationEditorSection("Content / Preview") {
-                    content
-                }
-                .disabled(isBusy || status.isLoadingCredentials)
-
-                DestinationEditorSection("Advanced") {
-                    advanced
-                }
-                .disabled(isBusy || status.isLoadingCredentials)
-
-                if let notice {
-                    DestinationEditorNotice(notice: notice)
-                }
-
-                DestinationEditorFooter(
-                    isBusy: isBusy,
-                    isLoadingCredentials: status.isLoadingCredentials,
-                    isDirty: isDirty,
-                    testTitle: testTitle,
-                    onTest: onTest,
-                    onDiscard: onDiscard,
-                    onSave: onSave
-                )
+                .frame(maxWidth: 680, alignment: .leading)
+                .padding(24)
+                .frame(maxWidth: .infinity, alignment: .top)
             }
-            .frame(maxWidth: 680, alignment: .leading)
-            .padding(24)
-            .frame(maxWidth: .infinity, alignment: .top)
+
+            Divider()
+
+            DestinationEditorFooter(
+                isBusy: isBusy,
+                isLoadingCredentials: status.isLoadingCredentials,
+                isDirty: isDirty,
+                testTitle: testTitle,
+                onTest: onTest,
+                onDiscard: onDiscard,
+                onSave: onSave
+            )
+            .frame(maxWidth: 680)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity)
+            .background(Color(nsColor: .windowBackgroundColor))
         }
     }
 }
@@ -66,9 +77,19 @@ private struct DestinationEditorHeader: View {
     let status: SettingsConfigurationStatus
     @Binding var isEnabled: Bool
     let isBusy: Bool
+    let onBack: (() -> Void)?
 
     var body: some View {
         HStack(alignment: .center, spacing: 14) {
+            if let onBack {
+                Button("Back", systemImage: "chevron.backward", action: onBack)
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.borderless)
+                    .controlSize(.large)
+                    .disabled(isBusy)
+                    .help("Back to Destinations")
+            }
+
             Image(nsImage: destination.image)
                 .resizable()
                 .scaledToFit()
@@ -193,28 +214,60 @@ struct DestinationCredentialField: View {
                     HStack(spacing: 10) {
                         Label("Stored ••••••••", systemImage: "key.fill")
                             .foregroundStyle(.secondary)
-                        Button("Replace") { credential.beginReplacement() }
-                        Button("Remove", role: .destructive) {
-                            credential.remove()
-                            onRemove()
-                        }
+                        Button("Replace", action: beginReplacement)
+                        Button("Remove", role: .destructive, action: removeCredential)
                     }
                 case .remove:
                     HStack(spacing: 10) {
                         Label("Credential will be removed when saved", systemImage: "trash")
                             .foregroundStyle(.orange)
-                        Button("Undo") { credential.keepStoredValue() }
+                        Button("Undo", action: keepStoredCredential)
                     }
                 default:
                     SecureField(placeholder, text: $credential.replacement)
                         .textFieldStyle(.roundedBorder)
-                    if credential.hadStoredValue {
-                        Button("Keep Stored Credential") { credential.keepStoredValue() }
-                            .buttonStyle(.link)
+                        .accessibilityLabel(title)
+                        .accessibilityHint(
+                            "This value is not stored until Save Changes is selected."
+                        )
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Label(pendingCredentialMessage, systemImage: "pencil.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer()
+                        if credential.hadStoredValue {
+                            Button("Cancel Replacement", action: keepStoredCredential)
+                                .buttonStyle(.link)
+                                .accessibilityHint(
+                                    "Discards the replacement and continues using the stored credential."
+                                )
+                        }
                     }
                 }
             }
         }
+    }
+
+    private var pendingCredentialMessage: String {
+        if credential.hadStoredValue {
+            "Replacement not saved. Choose Save Changes below to apply it."
+        } else {
+            "Credential not saved. Choose Save Changes below to store it."
+        }
+    }
+
+    private func beginReplacement() {
+        credential.beginReplacement()
+    }
+
+    private func removeCredential() {
+        credential.remove()
+        onRemove()
+    }
+
+    private func keepStoredCredential() {
+        credential.keepStoredValue()
     }
 }
 
@@ -305,11 +358,11 @@ private struct DestinationEditorFooter: View {
 
             Button("Discard Changes", action: onDiscard)
                 .disabled(isBusy || isLoadingCredentials || !isDirty)
-            Button("Save", action: onSave)
+            Button("Save Changes", action: onSave)
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
                 .disabled(isBusy || isLoadingCredentials || !isDirty)
+                .accessibilityHint("Saves configuration and pending credential changes.")
         }
-        .padding(.top, 2)
     }
 }

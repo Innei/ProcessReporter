@@ -5,6 +5,7 @@ struct S3DestinationView: View {
     let onTest: () -> Void
     let onSave: () -> Void
     let onClearCache: () -> Void
+    var onBack: (() -> Void)? = nil
     @State private var showingCachedIcons = false
     @State private var showingRetryFailedUploadsConfirmation = false
     @State private var showingRebuildCacheConfirmation = false
@@ -20,7 +21,8 @@ struct S3DestinationView: View {
             testTitle: "Upload Test Icon…",
             onTest: onTest,
             onDiscard: { store.discardDestinationDraft(.applicationIconHosting) },
-            onSave: onSave
+            onSave: onSave,
+            onBack: onBack
         ) {
             DestinationFormRow("Bucket") {
                 TextField("Bucket name", text: $store.s3Draft.bucket)
