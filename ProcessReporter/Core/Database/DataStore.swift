@@ -153,7 +153,7 @@ actor DataStore {
             return true
         }
         guard didChange else { return }
-        NotificationCenter.default.post(name: DataStore.changedNotification, object: nil)
+        Self.postChangedNotification()
     }
 
     func iconCount() async throws -> Int {
@@ -167,7 +167,7 @@ actor DataStore {
             try context.delete(model: IconModel.self)
             try context.save()
         }
-        NotificationCenter.default.post(name: DataStore.changedNotification, object: nil)
+        Self.postChangedNotification()
     }
 
     // MARK: - Reports
@@ -187,7 +187,7 @@ actor DataStore {
     /// before any database suspension point.
     nonisolated func stageReportForPublication(id: UUID) {
         guard suppressedReports.insert(id) else { return }
-        NotificationCenter.default.post(name: DataStore.changedNotification, object: nil)
+        Self.postChangedNotification()
     }
 
     /// Saves a report that remains invisible to every History read API.
@@ -232,7 +232,7 @@ actor DataStore {
     /// and the suppression removal that is the publication linearization point.
     nonisolated func publishStagedReport(id: UUID) {
         guard suppressedReports.remove(id) else { return }
-        NotificationCenter.default.post(name: DataStore.changedNotification, object: nil)
+        Self.postChangedNotification()
     }
 
     func deleteReport(id: UUID) async throws {
@@ -246,7 +246,7 @@ actor DataStore {
             try context.save()
         }
         suppressedReports.remove(id)
-        NotificationCenter.default.post(name: DataStore.changedNotification, object: nil)
+        Self.postChangedNotification()
     }
 
     func quarantineAndDeleteReport(id: UUID) async throws {
@@ -308,7 +308,7 @@ actor DataStore {
             }
             try context.save()
         }
-        NotificationCenter.default.post(name: DataStore.changedNotification, object: nil)
+        Self.postChangedNotification()
     }
 
     // Reports fetching with pagination and optional search
@@ -364,7 +364,7 @@ actor DataStore {
             try context.save()
         }
         suppressedReports.removeAll()
-        NotificationCenter.default.post(name: DataStore.changedNotification, object: nil)
+        Self.postChangedNotification()
     }
 
     // MARK: - Maintenance
@@ -387,7 +387,7 @@ actor DataStore {
 
             if deletedCount > 0 {
                 NSLog("Cleaned up \(deletedCount) old reports")
-                NotificationCenter.default.post(name: DataStore.changedNotification, object: nil)
+                Self.postChangedNotification()
             }
         } catch {
             NSLog("Failed to cleanup old reports: \(error.localizedDescription)")
@@ -423,6 +423,17 @@ actor DataStore {
 
 extension DataStore {
     static let changedNotification = Notification.Name("DataStoreChangedNotification")
+
+    private nonisolated static func postChangedNotification() {
+        let post = {
+            NotificationCenter.default.post(name: changedNotification, object: nil)
+        }
+        if Thread.isMainThread {
+            post()
+        } else {
+            DispatchQueue.main.async(execute: post)
+        }
+    }
 
     fileprivate static func reportHistoryProperties() -> [PartialKeyPath<ReportModel>] {
         [

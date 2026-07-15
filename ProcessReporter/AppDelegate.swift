@@ -290,14 +290,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func reinitializeAfterWake() {
-        // Reinitialize media monitoring after wake with proper callback restoration
+        // Restore capture immediately. Reporter publishes the current process first,
+        // then the media provider emits its refreshed state independently.
         wakeTask?.cancel()
         wakeTask = Task { @MainActor [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: 2_000_000_000)
-            } catch {
-                return
-            }
             guard self != nil, !Task.isCancelled else { return }
 
             guard let reporter = ApplicationState.reporter else { return }

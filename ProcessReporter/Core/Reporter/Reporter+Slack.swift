@@ -126,7 +126,10 @@ private final class SlackDeliveryQueue {
 		// lifecycle safety operation and must be able to run within the bounded app
 		// termination window instead of waiting behind the publish interval.
 		if requiresReportingAllowed {
-			var remainingWaitAttempts = 12
+			// Do not let Slack's local rate limit hold the global Presence batch for
+			// an entire reporting interval. A later event or heartbeat retries the
+			// latest state.
+			var remainingWaitAttempts = 1
 			while !slackRatelimiter.tryAcquire() {
 				guard PreferencesDataModel.reportingAllowed else {
 					return .failure(.ignored)
@@ -164,7 +167,7 @@ private final class SlackDeliveryQueue {
 				encoder: JSONParameterEncoder.default,
 				headers: headers,
 				requestModifier: { request in
-					request.timeoutInterval = requiresReportingAllowed ? 10 : 3
+					request.timeoutInterval = requiresReportingAllowed ? 2 : 3
 				}
 			).validate()
 			let response = try await withTaskCancellationHandler(
@@ -308,7 +311,8 @@ class SlackReporterExtension: ReporterExtension {
 				profile.status_expiration = Self.expirationTimestamp(
 					duration: Double(
 						min(max(1, slackConfig.expiration), maximumSlackStatusDuration)
-					)
+					),
+					referenceDate: data.timeStamp
 				)
 			}
 
@@ -522,15 +526,18 @@ class SlackReporterExtension: ReporterExtension {
 			)
 		}
 
-		return expirationTimestamp(duration: duration)
+		return expirationTimestamp(duration: duration, referenceDate: data.timeStamp)
 	}
 
-	private static func expirationTimestamp(duration: Double) -> Int {
+	private static func expirationTimestamp(
+		duration: Double,
+		referenceDate: Date = .now
+	) -> Int {
 		let boundedDuration = min(
 			Double(maximumSlackStatusDuration),
 			max(1, duration.isFinite ? duration : 1)
 		)
-		let now = Int(Date().timeIntervalSince1970.rounded(.down))
+		let now = Int(referenceDate.timeIntervalSince1970.rounded(.down))
 		let seconds = Int(boundedDuration.rounded(.up))
 		let result = now.addingReportingOverflow(seconds)
 		return result.overflow ? Int.max : result.partialValue

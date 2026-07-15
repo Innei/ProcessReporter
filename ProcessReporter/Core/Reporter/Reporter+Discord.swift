@@ -140,7 +140,7 @@ class DiscordReporterExtension: ReporterExtension {
 
         var presence = DiscordPresence()
 
-        let now = Int64(Date().timeIntervalSince1970)
+        let now = Int64(data.timeStamp.timeIntervalSince1970)
 
         // Decide whether to show media or process
         let hasMedia = !(data.mediaName?.isEmpty ?? true)

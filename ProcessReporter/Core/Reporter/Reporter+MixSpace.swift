@@ -29,11 +29,11 @@ private struct MixSpaceDataPayload: Codable {
     let timestamp: UInt
     let process: ProcessInfo
 
-    init(process: ProcessInfo, media: MediaInfo?, key: String) {
+    init(process: ProcessInfo, media: MediaInfo?, key: String, observedAt: Date) {
         self.media = media
         self.process = process
         self.key = key
-        timestamp = UInt(Int(Date().timeIntervalSince1970))
+        timestamp = UInt(max(0, Int(observedAt.timeIntervalSince1970)))
     }
 
     var deliveryOutputSummary: SyncOutputSummary {
@@ -111,7 +111,8 @@ private func sendMixSpaceRequest(
             elapsedTime: data.mediaElapsedTime,
             processName: data.mediaProcessName
         ),
-        key: token
+        key: token,
+        observedAt: data.timeStamp
     )
 
     let headers: HTTPHeaders = [

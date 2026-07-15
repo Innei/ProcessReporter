@@ -106,14 +106,15 @@ class ReportModel {
     init(
         windowInfo: FocusedWindowInfo?,
         integrations: [String],
-        mediaInfo: MediaInfo?
+        mediaInfo: MediaInfo?,
+        timeStamp: Date = .now
     ) {
         id = UUID()
         processName = nil
         windowTitle = nil
         processInfoRaw = windowInfo
 
-        timeStamp = .now
+        self.timeStamp = timeStamp
         integrationsData = try? JSONEncoder().encode(integrations)
         mediaInfoRaw = mediaInfo
 
