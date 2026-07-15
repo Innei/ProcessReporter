@@ -1,17 +1,36 @@
 import AppKit
 
-var reporter: Reporter?
+@MainActor
+enum ApplicationState {
+    static var reporter: Reporter?
+    static var bootstrapTask: Task<Void, Never>?
+    static var isTerminating = false
+}
 
+@MainActor
 func main() {
+    CredentialStore.recoverPendingPreferenceTransactions()
     let app = NSApplication.shared
     let delegate = AppDelegate()
     app.delegate = delegate
 
-    Task { @MainActor in
+    ApplicationState.bootstrapTask = SettingsMutationCoordinator.shared.enqueue {
         do {
             try await DataStore.shared.initialize()
-            reporter = Reporter()
+            guard !Task.isCancelled, !ApplicationState.isTerminating else { return }
+            await PreferencesDataModel.hydrateIntegrationCredentials()
+            guard !Task.isCancelled, !ApplicationState.isTerminating else { return }
+            ApplicationState.reporter = Reporter()
+            if let warning = PreferencesDataModel.integrationCredentialRecoveryWarning {
+                SettingWindowManager.shared.showWindow()
+                if let window = SettingWindowManager.shared.settingWindow {
+                    presentCredentialRecoveryWarning(warning, on: window)
+                }
+            }
+        } catch is CancellationError {
+            return
         } catch {
+            guard !ApplicationState.isTerminating else { return }
             NSLog("Failed to initialize database: \(error)")
             // Show alert to user
             let alert = NSAlert()
@@ -24,11 +43,65 @@ func main() {
         }
     }
 
-    setupMenu()
+    setupMenu(appDelegate: delegate)
     _ = NSApplicationMain(CommandLine.argc, CommandLine.unsafeArgv)
 }
 
-private func setupMenu() {
+@MainActor
+private func presentCredentialRecoveryWarning(_ warning: String, on window: NSWindow) {
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "Integration Credentials Need Attention"
+    alert.informativeText = warning
+
+    guard PreferencesDataModel.integrationCredentialStoreUnavailable else {
+        alert.addButton(withTitle: "OK")
+        alert.beginSheetModal(for: window) { _ in }
+        return
+    }
+
+    alert.addButton(withTitle: "Keep Store")
+    alert.addButton(withTitle: "Back Up Store and Quit")
+    alert.beginSheetModal(for: window) { response in
+        guard response == .alertSecondButtonReturn else { return }
+        Task { @MainActor in
+            let result = await CredentialStore.quarantineUnavailableJournal()
+            let resultAlert = NSAlert()
+            resultAlert.addButton(withTitle: "OK")
+
+            switch result {
+            case let .recovered(backupFileName):
+                resultAlert.alertStyle = .informational
+                resultAlert.messageText = "Credential Store Backed Up"
+                resultAlert.informativeText =
+                    "The unreadable store was preserved as \(backupFileName). "
+                    + "Relaunch ProcessReporter and re-enter integration credentials."
+                resultAlert.beginSheetModal(for: window) { _ in
+                    NSApplication.shared.terminate(nil)
+                }
+
+            case .notRequired:
+                resultAlert.alertStyle = .informational
+                resultAlert.messageText = "Credential Store Is Readable"
+                resultAlert.informativeText =
+                    "The earlier failure was transient. Relaunch ProcessReporter to load credentials safely."
+                resultAlert.beginSheetModal(for: window) { _ in
+                    NSApplication.shared.terminate(nil)
+                }
+
+            case .failed:
+                resultAlert.alertStyle = .critical
+                resultAlert.messageText = "Credential Store Could Not Be Backed Up"
+                resultAlert.informativeText =
+                    "No credential data was replaced. Check permissions and available disk space, then try again."
+                resultAlert.beginSheetModal(for: window) { _ in }
+            }
+        }
+    }
+}
+
+@MainActor
+private func setupMenu(appDelegate: AppDelegate) {
     let mainMenu = NSMenu()
 
     // MARK: - File Menu
@@ -41,6 +114,13 @@ private func setupMenu() {
         title: "Close Window",
         action: #selector(NSWindow.performClose(_:)),
         keyEquivalent: "w"
+    ))
+
+    fileMenu.addItem(NSMenuItem(
+        title: "Check for Updates…",
+        action: #selector(AppDelegate.checkForUpdates(_:)),
+        keyEquivalent: "",
+        target: appDelegate
     ))
 
     fileMenu.addItem(NSMenuItem(
@@ -72,4 +152,6 @@ private func setupMenu() {
     NSApp.mainMenu = mainMenu
 }
 
-main()
+MainActor.assumeIsolated {
+    main()
+}

@@ -21,6 +21,7 @@ enum DiscordActivityType: Int {
     case competing = 5
 }
 
+@MainActor
 protocol DiscordClient: AnyObject {
     var isConnected: Bool { get }
     func initialize(applicationId: String)
@@ -35,7 +36,7 @@ protocol DiscordClient: AnyObject {
         smallImageKey: String?,
         smallImageText: String?,
         buttons: [DiscordButton]?
-    )
+    ) async throws
     func clearActivity()
     func shutdown()
 }
@@ -44,14 +45,13 @@ final class NoopDiscordClient: DiscordClient {
     private(set) var isConnected: Bool = false
 
     func initialize(applicationId: String) {
-        // Placeholder for SDK init. Mark as connected for flow testing.
-        isConnected = !applicationId.isEmpty
-        NSLog("[Discord] Noop client initialized: connected=\(isConnected)")
+        isConnected = false
+        NSLog("[Discord] Discord SDK unavailable; presence was not initialized")
         DiscordDebugStore.shared.update { snapshot in
             snapshot.clientKind = "noop"
-            snapshot.isConnected = isConnected
-            snapshot.lastOutcome = "initialized"
-            snapshot.lastReason = isConnected ? nil : "empty applicationId"
+            snapshot.isConnected = false
+            snapshot.lastOutcome = "unavailable"
+            snapshot.lastReason = "Discord SDK is unavailable"
         }
     }
 
@@ -66,17 +66,8 @@ final class NoopDiscordClient: DiscordClient {
         smallImageKey: String?,
         smallImageText: String?,
         buttons: [DiscordButton]?
-    ) {
-        guard isConnected else {
-            NSLog("[Discord] Noop client not connected; skipping activity")
-            return
-        }
-        if let buttons, !buttons.isEmpty {
-            let desc = buttons.map { "{label:\($0.label),url:\($0.url)}" }.joined(separator: ",")
-            NSLog("[Discord] Noop setActivity details=\(details ?? "") state=\(state ?? "") type=\(activityType?.rawValue ?? -1) buttons=[\(desc)]")
-        } else {
-            NSLog("[Discord] Noop setActivity details=\(details ?? "") state=\(state ?? "") type=\(activityType?.rawValue ?? -1)")
-        }
+    ) async throws {
+        throw DiscordClientError.sdkUnavailable
     }
 
     func clearActivity() {
@@ -98,11 +89,27 @@ final class NoopDiscordClient: DiscordClient {
     }
 }
 
+enum DiscordClientError: LocalizedError {
+    case sdkUnavailable
+    case notConnected
+    case updateAlreadyInProgress
+
+    var errorDescription: String? {
+        switch self {
+        case .sdkUnavailable:
+            return "Discord SDK is unavailable"
+        case .notConnected:
+            return "Discord client is not connected"
+        case .updateAlreadyInProgress:
+            return "A Discord activity update is already in progress"
+        }
+    }
+}
+
+@MainActor
 enum DiscordClientProvider {
-    // Prefer bridge-backed client; fall back to noop if unavailable
-    static var shared: DiscordClient = {
-        // Attempt to instantiate the bridge-backed client dynamically
-        if NSClassFromString("DiscordSDKBridge") != nil {
+    static let shared: DiscordClient = {
+        if DiscordSDKBridge.isSDKAvailable() {
             return DiscordSDKClient()
         } else {
             return NoopDiscordClient()

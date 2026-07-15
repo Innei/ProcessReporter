@@ -10,56 +10,193 @@ import CryptoKit
 import Foundation
 
 struct S3UploaderOptions {
-    var bucket: String
-    var region: String
-    var accessKey: String
-    var secretKey: String
-    var endpoint: String?
-}
-
-class S3Uploader {
-    var options: S3UploaderOptions
-
-    var endpoint: String {
-        options.endpoint ?? "https://\(bucket).s3.\(region).amazonaws.com"
-    }
-
-    var bucket: String {
-        options.bucket
-    }
-
-    var region: String {
-        options.region
-    }
-
-    var accessKey: String {
-        options.accessKey
-    }
-
-    var secretKey: String {
-        options.secretKey
-    }
-
-    var customDomain: String {
-        PreferencesDataModel.shared.s3Integration.value.customDomain
-    }
+    let bucket: String
+    let region: String
+    let accessKey: String
+    let secretKey: String
+    let endpoint: String?
+    let customDomain: String?
 
     init(
-        options: S3UploaderOptions
+        bucket: String,
+        region: String,
+        accessKey: String,
+        secretKey: String,
+        endpoint: String? = nil,
+        customDomain: String? = nil
     ) {
+        self.bucket = bucket
+        self.region = region
+        self.accessKey = accessKey
+        self.secretKey = secretKey
+        self.endpoint = endpoint
+        self.customDomain = customDomain
+    }
+}
+
+enum S3UploaderError: LocalizedError {
+    case missingConfiguration(String)
+    case invalidEndpoint(String)
+    case insecureEndpoint(String)
+    case invalidObjectKey
+    case uploadFailed(statusCode: Int, response: String?)
+
+    var errorDescription: String? {
+        switch self {
+        case .missingConfiguration(let field):
+            return "Missing S3 configuration: \(field)"
+        case .invalidEndpoint(let value):
+            return "Invalid S3 endpoint: \(value)"
+        case .insecureEndpoint(let value):
+            return "S3 credentials require HTTPS (except localhost): \(value)"
+        case .invalidObjectKey:
+            return "Invalid S3 object path"
+        case .uploadFailed(let statusCode, let response):
+            if let response, !response.isEmpty {
+                return "S3 upload failed with HTTP \(statusCode): \(response)"
+            }
+            return "S3 upload failed with HTTP \(statusCode)"
+        }
+    }
+}
+
+final class S3Uploader {
+    private let options: S3UploaderOptions
+
+    init(options: S3UploaderOptions) {
         self.options = options
     }
 
-    // 计算 HMAC-SHA256 的辅助函数
-    func hmacSha256(key: Data, message: Data) -> Data {
+    private var usesCustomEndpoint: Bool {
+        guard let endpoint = options.endpoint?.trimmingCharacters(in: .whitespacesAndNewlines)
+        else { return false }
+        return !endpoint.isEmpty
+    }
+
+    private func endpointURL() throws -> URL {
+        let endpoint: String
+        if let configured = options.endpoint?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !configured.isEmpty
+        {
+            endpoint = configured
+        } else {
+            endpoint = "https://\(options.bucket).s3.\(options.region).amazonaws.com"
+        }
+
+        guard var components = URLComponents(string: endpoint),
+            let scheme = components.scheme?.lowercased(),
+            (scheme == "https" || scheme == "http"),
+            let host = components.host,
+            !host.isEmpty,
+            components.query == nil,
+            components.fragment == nil
+        else {
+            throw S3UploaderError.invalidEndpoint(endpoint)
+        }
+
+        if scheme == "http", !isLoopbackHost(host) {
+            throw S3UploaderError.insecureEndpoint(endpoint)
+        }
+
+        // A trailing slash must not produce a different canonical request path.
+        while components.path.count > 1, components.path.hasSuffix("/") {
+            components.path.removeLast()
+        }
+        guard let url = components.url else {
+            throw S3UploaderError.invalidEndpoint(endpoint)
+        }
+        return url
+    }
+
+    private static func pathSegments(from rawPath: String) throws -> [String] {
+        let segments = rawPath.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard !segments.contains(where: { $0 == "." || $0 == ".." || $0.isEmpty }) else {
+            throw S3UploaderError.invalidObjectKey
+        }
+        return segments
+    }
+
+    private static func sigV4EncodedPathSegment(_ segment: String) -> String {
+        let unreserved = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~".utf8)
+        return segment.utf8.map { byte in
+            unreserved.contains(byte) ? String(UnicodeScalar(byte)) : String(format: "%%%02X", byte)
+        }.joined()
+    }
+
+    private static func appending(segments: [String], to baseURL: URL) throws -> URL {
+        guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)
+        else {
+            throw S3UploaderError.invalidEndpoint(baseURL.absoluteString)
+        }
+        let baseSegments = components.path.split(
+            separator: "/", omittingEmptySubsequences: true
+        ).map(String.init)
+        let encodedSegments = (baseSegments + segments).map(sigV4EncodedPathSegment)
+        components.percentEncodedPath = encodedSegments.isEmpty
+            ? "/" : "/" + encodedSegments.joined(separator: "/")
+        guard let url = components.url else {
+            throw S3UploaderError.invalidEndpoint(baseURL.absoluteString)
+        }
+        return url
+    }
+
+    private func requestURL(for objectKey: String) throws -> URL {
+        guard !options.bucket.isEmpty else {
+            throw S3UploaderError.missingConfiguration("bucket")
+        }
+        let objectSegments = try Self.pathSegments(from: objectKey)
+        guard !objectSegments.isEmpty else {
+            throw S3UploaderError.invalidObjectKey
+        }
+
+        var url = try endpointURL()
+        // Custom S3-compatible endpoints generally use path-style addressing.
+        // AWS's generated endpoint already embeds the bucket in its host.
+        if usesCustomEndpoint {
+            url = try Self.appending(segments: [options.bucket], to: url)
+        }
+        return try Self.appending(segments: objectSegments, to: url)
+    }
+
+    private func publicURL(for objectKey: String) throws -> URL {
+        if let domain = options.customDomain?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !domain.isEmpty
+        {
+            guard let components = URLComponents(string: domain),
+                let scheme = components.scheme?.lowercased(),
+                (scheme == "https" || scheme == "http"),
+                components.host != nil,
+                components.query == nil,
+                components.fragment == nil,
+                let baseURL = components.url
+            else {
+                throw S3UploaderError.invalidEndpoint(domain)
+            }
+            return try Self.appending(
+                segments: Self.pathSegments(from: objectKey),
+                to: baseURL
+            )
+        }
+        return try requestURL(for: objectKey)
+    }
+
+    private func hmacSha256(key: Data, message: Data) -> Data {
         var hmac = HMAC<SHA256>(key: SymmetricKey(data: key))
         hmac.update(data: message)
         return Data(hmac.finalize())
     }
 
+    private func imageObjectKey(_ imageData: Data, path: String) throws -> String {
+        let filename = "\(imageData.md5()).png"
+        return (try Self.pathSegments(from: path) + [filename]).joined(separator: "/")
+    }
+
+    func publicImageURL(_ imageData: Data, to path: String) throws -> String {
+        try publicURL(for: imageObjectKey(imageData, path: path)).absoluteString
+    }
+
     func uploadImage(_ imageData: Data, to path: String) async throws -> String {
-        let md5Filename = imageData.md5()
-        let objectKey = path + "/\(md5Filename).png"
+        let objectKey = try imageObjectKey(imageData, path: path)
 
         try await uploadToS3(
             objectKey: objectKey,
@@ -67,101 +204,113 @@ class S3Uploader {
             contentType: "image/png"
         )
 
-        let customDomain = customDomain
-        if !customDomain.isEmpty {
-            return "\(customDomain)/\(objectKey)"
-        }
-        return "\(path)/\(objectKey)"
+        return try publicURL(for: objectKey).absoluteString
     }
 
-    // 通用的 S3 兼容存储上传函数
     func uploadToS3(
         objectKey: String,
         fileData: Data,
         contentType: String
     ) async throws {
+        guard !options.region.isEmpty else {
+            throw S3UploaderError.missingConfiguration("region")
+        }
+        guard !options.accessKey.isEmpty else {
+            throw S3UploaderError.missingConfiguration("access key")
+        }
+        guard !options.secretKey.isEmpty else {
+            throw S3UploaderError.missingConfiguration("secret key")
+        }
+
+        let requestURL = try requestURL(for: objectKey)
+        guard let urlComponents = URLComponents(url: requestURL, resolvingAgainstBaseURL: false),
+            let host = urlComponents.host
+        else {
+            throw S3UploaderError.invalidEndpoint(requestURL.absoluteString)
+        }
+
         let service = "s3"
-        let xAmzDate = ISO8601DateFormatter.s3DateFormatter.string(from: Date())
-        let dateStamp = String(xAmzDate.prefix(8)) // YYYYMMDD
-
-        // 计算哈希化的负载
+        let xAmzDate = Self.s3Timestamp(from: Date())
+        let dateStamp = String(xAmzDate.prefix(8))
         let hashedPayload = fileData.sha256()
+        let hostHeader: String
+        if let port = urlComponents.port {
+            let formattedHost = host.contains(":") ? "[\(host)]" : host
+            hostHeader = "\(formattedHost):\(port)"
+        } else {
+            hostHeader = host
+        }
 
-        // 设置请求头
-        let host = URL(string: endpoint)?.host ?? ""
-        let contentLength = String(fileData.count)
         let headers = [
-            "Host": host,
+            "Host": hostHeader,
             "Content-Type": contentType,
-            "Content-Length": contentLength,
+            "Content-Length": String(fileData.count),
             "x-amz-date": xAmzDate,
             "x-amz-content-sha256": hashedPayload,
         ]
 
-        // 创建规范请求
-        let sortedHeaders = headers.keys.sorted()
+        let sortedHeaders = headers.keys.sorted { $0.lowercased() < $1.lowercased() }
         let canonicalHeaders = sortedHeaders.map { key in
             let value = headers[key]!.trimmingCharacters(in: .whitespacesAndNewlines)
             return "\(key.lowercased()):\(value)"
         }.joined(separator: "\n")
         let signedHeaders = sortedHeaders.map { $0.lowercased() }.joined(separator: ";")
+        let canonicalURI = urlComponents.percentEncodedPath.isEmpty
+            ? "/" : urlComponents.percentEncodedPath
 
         let canonicalRequest = [
             "PUT",
-            "/\(bucket)/\(objectKey)",
-            "", // 无查询参数
+            canonicalURI,
+            "",
             canonicalHeaders,
-            "", // 额外换行符
+            "",
             signedHeaders,
             hashedPayload,
         ].joined(separator: "\n")
 
-        // 创建待签名字符串
         let algorithm = "AWS4-HMAC-SHA256"
-        let credentialScope = "\(dateStamp)/\(region)/\(service)/aws4_request"
-        let hashedCanonicalRequest = canonicalRequest.sha256()
+        let credentialScope = "\(dateStamp)/\(options.region)/\(service)/aws4_request"
         let stringToSign = [
             algorithm,
             xAmzDate,
             credentialScope,
-            hashedCanonicalRequest,
+            canonicalRequest.sha256(),
         ].joined(separator: "\n")
 
-        // 计算签名
-        let kSecret = Data(("AWS4" + secretKey).utf8)
+        let kSecret = Data(("AWS4" + options.secretKey).utf8)
         let kDate = hmacSha256(key: kSecret, message: Data(dateStamp.utf8))
-        let kRegion = hmacSha256(key: kDate, message: Data(region.utf8))
+        let kRegion = hmacSha256(key: kDate, message: Data(options.region.utf8))
         let kService = hmacSha256(key: kRegion, message: Data(service.utf8))
         let kSigning = hmacSha256(key: kService, message: Data("aws4_request".utf8))
         let signature = hmacSha256(key: kSigning, message: Data(stringToSign.utf8)).map {
             String(format: "%02x", $0)
         }.joined()
 
-        // 组装 Authorization 头
         let authorization =
-            "\(algorithm) Credential=\(accessKey)/\(credentialScope), SignedHeaders=\(signedHeaders), Signature=\(signature)"
+            "\(algorithm) Credential=\(options.accessKey)/\(credentialScope), SignedHeaders=\(signedHeaders), Signature=\(signature)"
 
-        // 创建并发送 PUT 请求
-        let url = URL(string: "\(endpoint)/\(bucket)/\(objectKey)")!
-        var request = URLRequest(url: url)
+        var request = URLRequest(url: requestURL)
         request.httpMethod = "PUT"
         request.httpBody = fileData
+        request.timeoutInterval = 10
         for (key, value) in headers {
             request.setValue(value, forHTTPHeaderField: key)
         }
         request.setValue(authorization, forHTTPHeaderField: "Authorization")
 
-        let (_, response) = try await URLSession.shared.data(for: request)
-        if let httpResponse = response as? HTTPURLResponse {
-            if httpResponse.statusCode != 200 {
-                throw NSError(
-                    domain: "", code: httpResponse.statusCode,
-                    userInfo: [NSLocalizedDescriptionKey: "上传失败，状态码：\(httpResponse.statusCode)"])
-            }
+        let (responseData, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw S3UploaderError.uploadFailed(statusCode: -1, response: "Invalid HTTP response")
+        }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            let responseSnippet = String(data: responseData.prefix(512), encoding: .utf8)
+            throw S3UploaderError.uploadFailed(
+                statusCode: httpResponse.statusCode,
+                response: responseSnippet
+            )
         }
     }
 
-    // 为了兼容性保留的 R2 上传方法
     func uploadFileToR2(
         accountId: String,
         accessKeyId: String,
@@ -171,43 +320,26 @@ class S3Uploader {
         fileData: Data,
         contentType: String
     ) async throws {
-        // 保存当前选项
-        let originalOptions = options
-
-        // 临时设置 R2 选项
-        let r2Options = S3UploaderOptions(
-            bucket: bucketName,
-            region: "auto", // Cloudflare R2 使用 "auto" 作为区域
-            accessKey: accessKeyId,
-            secretKey: secretAccessKey,
-            endpoint: "https://\(accountId).r2.cloudflarestorage.com"
+        let r2Uploader = S3Uploader(
+            options: S3UploaderOptions(
+                bucket: bucketName,
+                region: "auto",
+                accessKey: accessKeyId,
+                secretKey: secretAccessKey,
+                endpoint: "https://\(accountId).r2.cloudflarestorage.com"
+            )
         )
-        options = r2Options
-
-        // 使用通用上传方法
-        try await uploadToS3(
+        try await r2Uploader.uploadToS3(
             objectKey: objectKey,
             fileData: fileData,
             contentType: contentType
         )
-
-        // 恢复原始选项
-        options = originalOptions
     }
-}
 
-extension S3Uploader {
-    public func setOptions(options: S3UploaderOptions) {
-        self.options = options
-    }
-}
-
-// Extension for ISO8601DateFormatter
-extension ISO8601DateFormatter {
-    static let s3DateFormatter: ISO8601DateFormatter = {
+    private static func s3Timestamp(from date: Date) -> String {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withYear, .withMonth, .withDay, .withTime, .withTimeZone]
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        return formatter
-    }()
+        return formatter.string(from: date)
+    }
 }

@@ -8,106 +8,99 @@
 import Cocoa
 import Foundation
 
-class MediaControlInstallationHelper {
+@MainActor
+final class MediaControlInstallationHelper {
 
-    static func checkAndPromptInstallation() {
-        // Only check on macOS 15.4+ where CLI provider is used
-        guard #available(macOS 15.4, *) else { return }
+  static func checkAndPromptInstallation() {
+    // Only check on macOS 15.4+ where CLI provider is used
+    guard #available(macOS 15.4, *) else { return }
 
-        // Don't show if already prompted before
-        guard !PreferencesDataModel.hasShownMediaControlInstallPrompt.value else { return }
+    // Don't show if already prompted before
+    guard !PreferencesDataModel.hasShownMediaControlInstallPrompt.value else { return }
 
-        // Don't show if media-control is already installed
-        guard !CLIMediaInfoProvider.isMediaControlInstalled() else {
-            // Mark as shown since it's installed
-            PreferencesDataModel.hasShownMediaControlInstallPrompt.accept(true)
-            return
-        }
-
-        // Show the installation prompt
-        showInstallationPrompt()
+    // Don't show if media-control is already installed
+    guard !CLIMediaInfoProvider.isMediaControlInstalled() else {
+      // Mark as shown since it's installed
+      PreferencesDataModel.hasShownMediaControlInstallPrompt.accept(true)
+      return
     }
 
-    private static func showInstallationPrompt() {
-        DispatchQueue.main.async {
-            let alert = NSAlert()
-            alert.messageText = "Media Control Required"
-            alert.informativeText = """
-                ProcessReporter needs the 'media-control' tool to monitor media playback on macOS 15.4+.
+    // Show the installation prompt
+    showInstallationPrompt()
+  }
 
-                This tool allows the app to detect currently playing music and media information.
+  private static func showInstallationPrompt() {
+    let alert = NSAlert()
+    alert.messageText = "Optional Media Enrichment"
+    alert.informativeText = """
+      ProcessReporter can monitor media playback without additional software.
 
-                Would you like to install it now?
-                """
+      Installing the optional 'media-control' tool may provide richer artwork and process metadata on macOS 15.4 or later.
+      """
 
-            alert.addButton(withTitle: "Install Now")
-            alert.addButton(withTitle: "Manual Installation")
-            alert.addButton(withTitle: "Skip")
+    alert.addButton(withTitle: "Installation Instructions")
+    alert.addButton(withTitle: "Project Page")
+    alert.addButton(withTitle: "Not Now")
+    alert.alertStyle = .informational
 
-            alert.alertStyle = .informational
+    let response = alert.runModal()
+    PreferencesDataModel.hasShownMediaControlInstallPrompt.accept(true)
 
-            let response = alert.runModal()
-
-            // Mark as shown regardless of choice
-            PreferencesDataModel.hasShownMediaControlInstallPrompt.accept(true)
-
-            switch response {
-            case .alertFirstButtonReturn:  // Install Now
-                openBrewInstallationInstructions()
-            case .alertSecondButtonReturn:  // Manual Installation
-                openGitHubRepository()
-            case .alertThirdButtonReturn:  // Skip
-                break
-            default:
-                break
-            }
-        }
+    switch response {
+    case .alertFirstButtonReturn:
+      openBrewInstallationInstructions()
+    case .alertSecondButtonReturn:
+      openGitHubRepository()
+    default:
+      break
     }
+  }
 
-    private static func openBrewInstallationInstructions() {
-        let alert = NSAlert()
-        alert.messageText = "Installation Instructions"
-        alert.informativeText = """
-            To install media-control using Homebrew:
+  private static func openBrewInstallationInstructions() {
+    let alert = NSAlert()
+    alert.messageText = "Installation Instructions"
+    alert.informativeText = """
+      To install media-control using Homebrew:
 
-            1. Open Terminal
-            2. Run: brew tap ungive/media-control && brew install media-control
-            3. Restart ProcessReporter after installation
+      1. Open Terminal
+      2. Run: brew tap ungive/media-control && brew install media-control
+      3. Restart ProcessReporter after installation
 
-            If you don't have Homebrew installed, click "Manual Installation" for other options.
-            """
+      If you don't have Homebrew installed, click "Manual Installation" for other options.
+      """
 
-        alert.addButton(withTitle: "Copy Command")
-        alert.addButton(withTitle: "Manual Installation")
-        alert.addButton(withTitle: "Close")
+    alert.addButton(withTitle: "Copy Command")
+    alert.addButton(withTitle: "Manual Installation")
+    alert.addButton(withTitle: "Close")
 
-        let response = alert.runModal()
+    let response = alert.runModal()
 
-        switch response {
-        case .alertFirstButtonReturn:  // Copy Command
-            let pasteboard = NSPasteboard.general
-            pasteboard.clearContents()
-            pasteboard.setString("brew tap ungive/media-control && brew install media-control", forType: .string)
+    switch response {
+    case .alertFirstButtonReturn:  // Copy Command
+      let pasteboard = NSPasteboard.general
+      pasteboard.clearContents()
+      pasteboard.setString(
+        "brew tap ungive/media-control && brew install media-control", forType: .string)
 
-            // Show confirmation
-            let confirmation = NSAlert()
-            confirmation.messageText = "Command Copied"
-            confirmation.informativeText =
-                "The installation command has been copied to your clipboard. Paste it in Terminal to install."
-            confirmation.addButton(withTitle: "OK")
-            confirmation.runModal()
+      // Show confirmation
+      let confirmation = NSAlert()
+      confirmation.messageText = "Command Copied"
+      confirmation.informativeText =
+        "The installation command has been copied to your clipboard. Paste it in Terminal to install."
+      confirmation.addButton(withTitle: "OK")
+      confirmation.runModal()
 
-        case .alertSecondButtonReturn:  // Manual Installation
-            openGitHubRepository()
+    case .alertSecondButtonReturn:  // Manual Installation
+      openGitHubRepository()
 
-        default:
-            break
-        }
+    default:
+      break
     }
+  }
 
-    private static func openGitHubRepository() {
-        if let url = URL(string: "https://github.com/ungive/media-control") {
-            NSWorkspace.shared.open(url)
-        }
+  private static func openGitHubRepository() {
+    if let url = URL(string: "https://github.com/ungive/media-control") {
+      NSWorkspace.shared.open(url)
     }
+  }
 }

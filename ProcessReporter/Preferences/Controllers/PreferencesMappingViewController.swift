@@ -10,7 +10,8 @@ import RxSwift
 import SnapKit
 import SwiftUI
 
-class PreferencesMappingViewController: NSViewController, SettingWindowProtocol {
+@MainActor
+final class PreferencesMappingViewController: NSViewController, SettingWindowProtocol {
 	let frameSize: NSSize = .init(width: 600, height: 400)
 
 	convenience init() {
@@ -21,16 +22,17 @@ class PreferencesMappingViewController: NSViewController, SettingWindowProtocol 
 		view = NSHostingView(rootView: MappingView())
 	}
 
-	override func viewWillAppear() {}
 }
 
-class MappingViewModel: ObservableObject {
+@MainActor
+final class MappingViewModel: ObservableObject {
 	@Published var data: [PreferencesDataModel.Mapping] = []
 	private let disposeBag = DisposeBag()
 
 	init() {
 		// 订阅 PreferencesDataModel 的 mappingList
 		PreferencesDataModel.shared.mappingList
+			.observe(on: MainScheduler.instance)
 			.subscribe(onNext: { [weak self] items in
 				self?.data = items.getList()
 			})
@@ -44,7 +46,6 @@ struct MappingView: View {
 
 	@State var addNewItemSheetOpen = false
 	@State var editingItem: PreferencesDataModel.Mapping? = nil
-	@State var editingIndex: Int? = nil
 
 	var body: some View {
 		VStack {
@@ -61,16 +62,16 @@ struct MappingView: View {
 			}
 
 			Table(viewModel.data, selection: $selectedItem) {
-				TableColumn("type") { item in
+				TableColumn("Type") { item in
 					Text(item.type.toCopyable())
 						.lineLimit(1)
 				}.width(min: 150)
 
-				TableColumn("from") { item in
+				TableColumn("From") { item in
 					Text(item.from)
 						.lineLimit(1)
 				}
-				TableColumn("to") { item in
+				TableColumn("To") { item in
 					Text(item.to)
 						.lineLimit(1)
 				}
@@ -80,7 +81,6 @@ struct MappingView: View {
 					Button("Edit") {
 						if let id = selection.first, let item = viewModel.data.first(where: { $0.id == id }) {
 							editingItem = item
-							editingIndex = viewModel.data.firstIndex(where: { $0.id == id })
 						}
 					}
 					Divider()
@@ -91,7 +91,6 @@ struct MappingView: View {
 					if selectedItem.count == 1, let id = selectedItem.first, let itemIndex = viewModel.data.firstIndex(where: { $0.id == id }) {
 						let item = viewModel.data[itemIndex]
 						editingItem = item
-						editingIndex = itemIndex
 					}
 				}
 
@@ -101,30 +100,46 @@ struct MappingView: View {
 					addNewItemSheetOpen.toggle()
 				} label: {
 					Image(systemName: "plus").font(Font.system(size: 12, weight: .bold))
-				}.padding(.trailing, 3).buttonStyle(.plain)
+				}.accessibilityLabel("Add mapping")
+					.padding(.trailing, 3).buttonStyle(.plain)
 
 				Rectangle().fill(.separator).frame(width: 1, height: 16).clipShape(RoundedRectangle(cornerRadius: 4))
 
 				Button {
 					withAnimation {
 						PreferencesDataModel.shared.mappingList.value.removeMapping(viewModel.data.filter { selectedItem.contains($0.id) })
+						selectedItem.removeAll()
 					}
 
 				} label: {
 					Image(systemName: "minus").font(Font.system(size: 12, weight: .regular))
-				}.padding(.leading, 3).padding(.trailing, 12)
+				}.accessibilityLabel("Remove selected mappings")
+					.disabled(selectedItem.isEmpty)
+					.padding(.leading, 3).padding(.trailing, 12)
 					.buttonStyle(.plain)
 			}.padding(.bottom, 12).padding(.top, 6)
 		}.sheet(isPresented: $addNewItemSheetOpen) {
 			withAnimation {
 				AddNewMappingView(mode: .add, onComplete: { from, to, type in
-					PreferencesDataModel.shared.mappingList.value.addMapping(.init(type: type, from: from, to: to))
+					let added = PreferencesDataModel.shared.mappingList.value.addMapping(
+						.init(type: type, from: from, to: to))
+					if !added {
+						ToastManager.shared.warning("This mapping already exists")
+					}
 				})
 			}
 		}
 		.sheet(item: $editingItem) { item in
 			AddNewMappingView(mode: .edit(item), onComplete: { from, to, type in
-				PreferencesDataModel.shared.mappingList.value.editMapping(.init(type: type, from: from, to: to), for: editingIndex!)
+				guard let index = viewModel.data.firstIndex(where: { $0.id == item.id }) else {
+					ToastManager.shared.error("The mapping no longer exists")
+					return
+				}
+				let edited = PreferencesDataModel.shared.mappingList.value.editMapping(
+					.init(type: type, from: from, to: to), for: index)
+				if !edited {
+					ToastManager.shared.warning("This mapping already exists")
+				}
 			})
 		}
 	}
@@ -174,6 +189,12 @@ struct AddNewMappingView: View {
 	}
 
 	@State var appSelectorOpen = false
+	private var trimmedFrom: String {
+		from.trimmingCharacters(in: .whitespacesAndNewlines)
+	}
+	private var trimmedTo: String {
+		to.trimmingCharacters(in: .whitespacesAndNewlines)
+	}
 
 	var body: some View {
 		VStack(alignment: .leading, spacing: 20) {
@@ -196,7 +217,8 @@ struct AddNewMappingView: View {
 								appSelectorOpen.toggle()
 							} label: {
 								Image(systemName: "scope").font(.system(size: 12, weight: .bold))
-							}.buttonStyle(.plain).padding(.trailing, 3)
+							}.accessibilityLabel("Choose an application")
+								.buttonStyle(.plain).padding(.trailing, 3)
 						}
 					}
 				}
@@ -230,12 +252,12 @@ struct AddNewMappingView: View {
 				.buttonStyle(.bordered)
 
 				Button("Done") {
-					onComplete(from, to, type)
+					onComplete(trimmedFrom, trimmedTo, type)
 					presentationMode.wrappedValue.dismiss()
 				}
 				.keyboardShortcut(.defaultAction)
 				.buttonStyle(.borderedProminent)
-				.disabled(from.isEmpty || to.isEmpty)
+				.disabled(trimmedFrom.isEmpty || trimmedTo.isEmpty)
 			}
 			.padding(.top, 8)
 		}

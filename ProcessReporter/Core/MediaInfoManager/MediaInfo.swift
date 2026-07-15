@@ -1,4 +1,4 @@
-public struct MediaInfo {
+public struct MediaInfo: Sendable {
   let name: String?
   let artist: String?
   let album: String?

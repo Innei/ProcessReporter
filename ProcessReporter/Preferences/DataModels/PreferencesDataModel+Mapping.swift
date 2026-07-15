@@ -16,12 +16,13 @@ extension PreferencesDataModel {
 extension PreferencesDataModel {
 	enum MappingType: String, CaseIterable, DictionaryConvertible, UserDefaultsJSONStorable, DictionaryConvertibleDelegate {
 		static func fromDictionary(_ dict: Any) -> MappingType {
-			return self.init(rawValue: dict as! String) ?? .processApplicationIdentifier
+			guard let rawValue = dict as? String else { return .processApplicationIdentifier }
+			return self.init(rawValue: rawValue) ?? .processApplicationIdentifier
 		}
 	 
 		static func fromStorable(_ value: Any?) -> MappingType? {
-			guard let value = value else { return nil }
-			return fromDictionary(value)
+			guard let rawValue = value as? String else { return nil }
+			return MappingType(rawValue: rawValue)
 		}
 	 
 		func toStorable() -> Any? {
@@ -51,16 +52,27 @@ extension PreferencesDataModel {
 		}
 	}
 
-	struct Mapping: DictionaryConvertible, UserDefaultsJSONStorable, Identifiable {
+	struct Mapping: DictionaryConvertible, UserDefaultsJSONStorable, Identifiable, Equatable {
 		var id: String {
-			"\(from)-\(to)-\(type.rawValue)"
+			"\(type.rawValue.count)#\(type.rawValue)\(from.count)#\(from)\(to.count)#\(to)"
 		}
 		
 		static func fromDictionary(_ dict: Any) -> Mapping {
-			let dict = dict as! [String: Any]
-			let type = MappingType.fromDictionary(dict["type"]!)
-			let from = dict["from"] as! String
-			let to = dict["to"] as! String
+			return fromDictionaryIfValid(dict)
+				?? Mapping(type: .processApplicationIdentifier, from: "", to: "")
+		}
+
+		fileprivate static func fromDictionaryIfValid(_ value: Any) -> Mapping? {
+			guard let dictionary = value as? [String: Any],
+			      let rawType = dictionary["type"] as? String,
+			      let type = MappingType(rawValue: rawType),
+			      let from = dictionary["from"] as? String,
+			      let to = dictionary["to"] as? String,
+			      !from.isEmpty,
+			      !to.isEmpty
+			else {
+				return nil
+			}
 			return Mapping(type: type, from: from, to: to)
 		}
 	 
@@ -79,14 +91,27 @@ extension PreferencesDataModel {
 		}
 	 
 		static func fromDictionary(_ dict: Any) -> MappingList {
-			let dict = dict as! [[String: Any]]
-			let mappings = dict.map { Mapping.fromDictionary($0) }
+			guard let dictionaries = dict as? [[String: Any]] else {
+				return MappingList(mappings: [])
+			}
+			let mappings = dictionaries.compactMap(Mapping.fromDictionaryIfValid)
 			return MappingList(mappings: mappings)
 		}
 	 
 		static func fromStorable(_ value: Any?) -> MappingList? {
-			guard let value = value else { return nil }
-			return fromDictionary(value)
+			guard let value else { return nil }
+			if let dictionaries = value as? [[String: Any]] {
+				return fromDictionary(dictionaries)
+			}
+			// Accept an older JSON-string representation if one exists.
+			if let string = value as? String,
+			   let data = string.data(using: .utf8),
+			   let decoded = try? JSONDecoder().decode(MappingList.self, from: data)
+			{
+				return MappingList(
+					mappings: decoded.mappings.filter { !$0.from.isEmpty && !$0.to.isEmpty })
+			}
+			return nil
 		}
 	 
 		func toStorable() -> Any? {
@@ -103,12 +128,17 @@ extension PreferencesDataModel {
 			return mappings
 		}
 
-		func addMapping(_ mapping: Mapping) {
+		@discardableResult
+		@MainActor
+		func addMapping(_ mapping: Mapping) -> Bool {
+			guard !mappings.contains(mapping) else { return false }
 			PreferencesDataModel.shared.mappingList.accept(
 				MappingList(mappings: mappings + [mapping])
 			)
+			return true
 		}
 		
+		@MainActor
 		func removeMapping(_ mappings: [Mapping]) {
 			PreferencesDataModel.shared.mappingList.accept(
 				MappingList(mappings: self.mappings.filter { item in
@@ -117,12 +147,20 @@ extension PreferencesDataModel {
 			)
 		}
 
-		func editMapping(_ mapping: Mapping, for index: Int) {
+		@discardableResult
+		@MainActor
+		func editMapping(_ mapping: Mapping, for index: Int) -> Bool {
+			guard mappings.indices.contains(index),
+			      !mappings.enumerated().contains(where: { offset, item in
+				      offset != index && item == mapping
+			      })
+			else { return false }
 			PreferencesDataModel.shared.mappingList.accept(
 				MappingList(mappings: mappings.enumerated().map { i, item in
 					i == index ? mapping : item
 				})
 			)
+			return true
 		}
 	}
 }

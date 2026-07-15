@@ -3,48 +3,817 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  # Keep retries for one tag serialized without allowing another tag to replace
+  # a pending release run. The verified promotion step converges global latest.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build:
-    runs-on: macos-latest
-    strategy:
-      matrix:
-        arch: [x86_64, arm64]
+  release:
+    name: Build and publish
+    runs-on: macos-15
+    timeout-minutes: 60
+    environment: release
+
+    env:
+      ARCHIVE_PATH: ${{ github.workspace }}/build/ProcessReporter.xcarchive
+      EXPORT_PATH: ${{ github.workspace }}/build/export
+      DIST_PATH: ${{ github.workspace }}/build/dist
+      SOURCE_PACKAGES_PATH: ${{ github.workspace }}/build/SourcePackages
+      SPARKLE_FEED_URL: https://github.com/innei/ProcessReporter/releases/latest/download/appcast.xml
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Select Xcode
-        run: sudo xcode-select -switch /Applications/Xcode_16.2.app
-
-      - name: Show Xcode version
-        run: xcodebuild -version
-
-      - name: List directory
-        run: ls -la
-
-      - name: Build
-        run: |
-          xcodebuild -project ProcessReporter.xcodeproj \
-            -scheme ProcessReporter \
-            -configuration Release \
-            -arch ${{ matrix.arch }} \
-            -derivedDataPath build \
-            CODE_SIGN_IDENTITY="-" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
-
-      - name: Create dmg
-        run: |
-          hdiutil create -fs HFS+ -volname "ProcessReporter" -srcfolder build/Build/Products/Release/ProcessReporter.app build/ProcessReporter-${{ matrix.arch }}.dmg
-
-      - name: Create Release
-        id: create_release
-        uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Check out tagged source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          files: |
-            build/ProcessReporter-${{ matrix.arch }}.dmg
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate tag, project version, and release notes
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Invalid release tag: $TAG" >&2
+            exit 1
+          fi
+
+          if [[ "$(git cat-file -t "refs/tags/$TAG")" != "tag" ]]; then
+            echo "Release tags must be annotated tags." >&2
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          TAG_COMMIT="$(git rev-list -n 1 "$TAG")"
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then
+            echo "Release tag must point to a commit contained in origin/main." >&2
+            exit 1
+          fi
+
+          semver_greater_than() {
+            local left_major left_minor left_patch
+            local right_major right_minor right_patch
+            IFS=. read -r left_major left_minor left_patch <<< "$1"
+            IFS=. read -r right_major right_minor right_patch <<< "$2"
+            (( left_major > right_major )) && return 0
+            (( left_major < right_major )) && return 1
+            (( left_minor > right_minor )) && return 0
+            (( left_minor < right_minor )) && return 1
+            (( left_patch > right_patch ))
+          }
+
+          # The historical v0.5.0 asset contains marketing version 1.5.0.
+          # Keep this one-time repository baseline explicit so a hand-created
+          # tag cannot publish another 1.5.0 build as the newest release.
+          if ! semver_greater_than "$VERSION" "1.5.0"; then
+            echo "$TAG must be greater than the distributed 1.5.0 baseline." >&2
+            exit 1
+          fi
+
+          VERSION_COUNT="$(sed -nE 's/^[[:space:]]*MARKETING_VERSION = ([^;]+);/\1/p' ProcessReporter.xcodeproj/project.pbxproj | sort -u | wc -l | xargs)"
+          PROJECT_VERSION="$(sed -nE 's/^[[:space:]]*MARKETING_VERSION = ([^;]+);/\1/p' ProcessReporter.xcodeproj/project.pbxproj | sort -u | head -n 1)"
+          BUILD_COUNT="$(sed -nE 's/^[[:space:]]*CURRENT_PROJECT_VERSION = ([^;]+);/\1/p' ProcessReporter.xcodeproj/project.pbxproj | sort -u | wc -l | xargs)"
+          PROJECT_BUILD="$(sed -nE 's/^[[:space:]]*CURRENT_PROJECT_VERSION = ([^;]+);/\1/p' ProcessReporter.xcodeproj/project.pbxproj | sort -u | head -n 1)"
+
+          if [[ "$VERSION_COUNT" != "1" || "$PROJECT_VERSION" != "$VERSION" ]]; then
+            echo "Tag $TAG does not match the unique MARKETING_VERSION ($PROJECT_VERSION)." >&2
+            exit 1
+          fi
+          if [[ "$BUILD_COUNT" != "1" || ! "$PROJECT_BUILD" =~ ^[1-9][0-9]*$ ]]; then
+            echo "CURRENT_PROJECT_VERSION must be one unique positive integer." >&2
+            exit 1
+          fi
+
+          while IFS= read -r EXISTING_TAG; do
+            [[ "$EXISTING_TAG" == "$TAG" ]] && continue
+            EXISTING_VERSION="${EXISTING_TAG#v}"
+            [[ "$EXISTING_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || continue
+            if ! semver_greater_than "$VERSION" "$EXISTING_VERSION"; then
+              echo "$TAG must be greater than existing semantic tag $EXISTING_TAG." >&2
+              exit 1
+            fi
+
+            PRIOR_BUILD="$(git show "$EXISTING_TAG:ProcessReporter.xcodeproj/project.pbxproj" 2>/dev/null | sed -nE 's/^[[:space:]]*CURRENT_PROJECT_VERSION = ([0-9]+);/\1/p' | sort -n | tail -n 1)"
+            if [[ "$PRIOR_BUILD" =~ ^[1-9][0-9]*$ ]] && (( PROJECT_BUILD <= PRIOR_BUILD )); then
+              echo "Build $PROJECT_BUILD must exceed build $PRIOR_BUILD from $EXISTING_TAG." >&2
+              exit 1
+            fi
+          done < <(git tag --list 'v*')
+
+          NOTES_FILE=".github/release-notes/${TAG}.md"
+          if [[ ! -s "$NOTES_FILE" ]]; then
+            echo "Missing non-empty release notes: $NOTES_FILE" >&2
+            exit 1
+          fi
+
+          {
+            echo "tag=$TAG"
+            echo "version=$VERSION"
+            echo "build=$PROJECT_BUILD"
+            echo "notes_file=$NOTES_FILE"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Show toolchain
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          swift --version
+
+      - name: Prepare universal Discord SDK
+        run: bash scripts/setup_discord_sdk.sh
+
+      - name: Select distribution mode
+        id: distribution
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          NOTARY_PRIVATE_KEY_BASE64: ${{ secrets.NOTARY_PRIVATE_KEY_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
+          REQUIRE_DEVELOPER_ID: ${{ vars.REQUIRE_DEVELOPER_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${SPARKLE_PRIVATE_KEY:?Missing SPARKLE_PRIVATE_KEY}"
+          : "${SPARKLE_PUBLIC_ED_KEY:?Missing SPARKLE_PUBLIC_ED_KEY}"
+          case "${REQUIRE_DEVELOPER_ID:-false}" in
+            true | false) ;;
+            *)
+              echo "REQUIRE_DEVELOPER_ID must be true or false when configured." >&2
+              exit 1
+              ;;
+          esac
+
+          APPLE_SECRET_COUNT=0
+          for VALUE in \
+            "$BUILD_CERTIFICATE_BASE64" \
+            "$P12_PASSWORD" \
+            "$NOTARY_PRIVATE_KEY_BASE64" \
+            "$NOTARY_KEY_ID" \
+            "$NOTARY_ISSUER_ID"
+          do
+            [[ -z "$VALUE" ]] || APPLE_SECRET_COUNT=$((APPLE_SECRET_COUNT + 1))
+          done
+
+          case "$APPLE_SECRET_COUNT" in
+            0)
+              if [[ "${REQUIRE_DEVELOPER_ID:-false}" == "true" ]]; then
+                echo "Developer ID distribution is required, but Apple credentials are absent." >&2
+                exit 1
+              fi
+              echo "mode=adhoc" >> "$GITHUB_OUTPUT"
+              {
+                echo "### Distribution mode: ad-hoc"
+                echo
+                echo "Apple Developer ID credentials are absent. The application will be"
+                echo "ad-hoc signed and will not be submitted for notarization."
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            5)
+              echo "mode=developer-id" >> "$GITHUB_OUTPUT"
+              echo "### Distribution mode: Developer ID + notarization" >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            *)
+              echo "Apple signing credentials are only partially configured." >&2
+              echo "Provide all five Developer ID/notary secrets or leave all five empty." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Prepare isolated release keychain
+        id: signing
+        env:
+          DISTRIBUTION_MODE: ${{ steps.distribution.outputs.mode }}
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PATH="$RUNNER_TEMP/processreporter-build.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
+          echo "keychain_path=$KEYCHAIN_PATH" >> "$GITHUB_OUTPUT"
+
+          if [[ "$DISTRIBUTION_MODE" != "developer-id" ]]; then
+            exit 0
+          fi
+
+          : "${BUILD_CERTIFICATE_BASE64:?Missing BUILD_CERTIFICATE_BASE64}"
+          : "${P12_PASSWORD:?Missing P12_PASSWORD}"
+          CERTIFICATE_PATH="$RUNNER_TEMP/developer-id.p12"
+          printf '%s' "$BUILD_CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+          chmod 600 "$CERTIFICATE_PATH"
+          security import "$CERTIFICATE_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | sed -nE 's/.*"(Developer ID Application:[^"]+)".*/\1/p' | head -n 1)"
+          if [[ -z "$SIGNING_IDENTITY" ]]; then
+            echo "No Developer ID Application identity was imported." >&2
+            exit 1
+          fi
+          echo "identity=$SIGNING_IDENTITY" >> "$GITHUB_OUTPUT"
+
+      - name: Archive and export universal application
+        env:
+          DISTRIBUTION_MODE: ${{ steps.distribution.outputs.mode }}
+          SIGNING_IDENTITY: ${{ steps.signing.outputs.identity }}
+          SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${SPARKLE_PUBLIC_ED_KEY:?Missing SPARKLE_PUBLIC_ED_KEY}"
+          rm -rf "$ARCHIVE_PATH" "$EXPORT_PATH" "$DIST_PATH"
+          mkdir -p "$EXPORT_PATH" "$DIST_PATH"
+
+          if [[ "$DISTRIBUTION_MODE" == "developer-id" ]]; then
+            xcodebuild archive \
+              -project ProcessReporter.xcodeproj \
+              -scheme ProcessReporter \
+              -configuration Release \
+              -destination 'generic/platform=macOS' \
+              -archivePath "$ARCHIVE_PATH" \
+              -clonedSourcePackagesDirPath "$SOURCE_PACKAGES_PATH" \
+              ARCHS='arm64 x86_64' \
+              ONLY_ACTIVE_ARCH=NO \
+              CODE_SIGN_STYLE=Manual \
+              CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
+              SPARKLE_FEED_URL="$SPARKLE_FEED_URL" \
+              SPARKLE_PUBLIC_ED_KEY="$SPARKLE_PUBLIC_ED_KEY"
+
+            xcodebuild -exportArchive \
+              -archivePath "$ARCHIVE_PATH" \
+              -exportPath "$EXPORT_PATH" \
+              -exportOptionsPlist ExportOptions.plist
+          else
+            # Sparkle documents that ad-hoc signing and Library Validation are
+            # incompatible. Disable the hardened runtime only for this temporary
+            # unsigned distribution mode; Developer ID builds retain it.
+            xcodebuild archive \
+              -project ProcessReporter.xcodeproj \
+              -scheme ProcessReporter \
+              -configuration Release \
+              -destination 'generic/platform=macOS' \
+              -archivePath "$ARCHIVE_PATH" \
+              -clonedSourcePackagesDirPath "$SOURCE_PACKAGES_PATH" \
+              ARCHS='arm64 x86_64' \
+              ONLY_ACTIVE_ARCH=NO \
+              CODE_SIGN_STYLE=Manual \
+              CODE_SIGN_IDENTITY=- \
+              DEVELOPMENT_TEAM= \
+              ENABLE_HARDENED_RUNTIME=NO \
+              SPARKLE_FEED_URL="$SPARKLE_FEED_URL" \
+              SPARKLE_PUBLIC_ED_KEY="$SPARKLE_PUBLIC_ED_KEY"
+
+            ditto \
+              "$ARCHIVE_PATH/Products/Applications/ProcessReporter.app" \
+              "$EXPORT_PATH/ProcessReporter.app"
+          fi
+
+      - name: Verify application signatures and architectures
+        env:
+          DISTRIBUTION_MODE: ${{ steps.distribution.outputs.mode }}
+          SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${SPARKLE_PUBLIC_ED_KEY:?Missing SPARKLE_PUBLIC_ED_KEY}"
+          APP_PATH="$EXPORT_PATH/ProcessReporter.app"
+          DISCORD_BINARY="$APP_PATH/Contents/Frameworks/discord_game_sdk.dylib"
+          SPARKLE_FRAMEWORK="$APP_PATH/Contents/Frameworks/Sparkle.framework"
+          SPARKLE_VERSION="$SPARKLE_FRAMEWORK/Versions/Current"
+          SPARKLE_BINARY="$SPARKLE_VERSION/Sparkle"
+          AUTOUPDATE_BINARY="$SPARKLE_VERSION/Autoupdate"
+          UPDATER_APP="$SPARKLE_VERSION/Updater.app"
+          UPDATER_BINARY="$UPDATER_APP/Contents/MacOS/Updater"
+          DOWNLOADER_XPC="$SPARKLE_VERSION/XPCServices/Downloader.xpc"
+          DOWNLOADER_BINARY="$DOWNLOADER_XPC/Contents/MacOS/Downloader"
+          INSTALLER_XPC="$SPARKLE_VERSION/XPCServices/Installer.xpc"
+          INSTALLER_BINARY="$INSTALLER_XPC/Contents/MacOS/Installer"
+
+          verify_universal() {
+            local binary="$1"
+            local architectures
+            architectures="$(lipo -archs "$binary")"
+            [[ " $architectures " == *" arm64 "* && " $architectures " == *" x86_64 "* ]] || {
+              echo "Not universal: $binary ($architectures)" >&2
+              exit 1
+            }
+          }
+
+          verify_signature_mode() {
+            local code_path="$1"
+            local signature_info
+            codesign --verify --strict --verbose=2 "$code_path"
+            signature_info="$(codesign -dv --verbose=4 "$code_path" 2>&1)"
+            if [[ "$DISTRIBUTION_MODE" == "developer-id" ]]; then
+              grep -F "Authority=Developer ID Application:" <<< "$signature_info" >/dev/null
+            else
+              grep -F "Signature=adhoc" <<< "$signature_info" >/dev/null
+            fi
+          }
+
+          test -d "$APP_PATH"
+          test -f "$DISCORD_BINARY"
+          for BINARY in \
+            "$APP_PATH/Contents/MacOS/ProcessReporter" \
+            "$DISCORD_BINARY" \
+            "$SPARKLE_BINARY" \
+            "$AUTOUPDATE_BINARY" \
+            "$UPDATER_BINARY" \
+            "$DOWNLOADER_BINARY" \
+            "$INSTALLER_BINARY"
+          do
+            test -f "$BINARY"
+            verify_universal "$BINARY"
+          done
+
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          for CODE_PATH in \
+            "$APP_PATH" \
+            "$DISCORD_BINARY" \
+            "$SPARKLE_FRAMEWORK" \
+            "$AUTOUPDATE_BINARY" \
+            "$UPDATER_APP" \
+            "$DOWNLOADER_XPC" \
+            "$INSTALLER_XPC"
+          do
+            verify_signature_mode "$CODE_PATH"
+          done
+
+          SIGNATURE_INFO="$(codesign -dv --verbose=4 "$APP_PATH" 2>&1)"
+          printf '%s\n' "$SIGNATURE_INFO"
+
+          if [[ "$DISTRIBUTION_MODE" == "adhoc" ]]; then
+            if grep -E 'CodeDirectory .*flags=.*runtime' <<< "$SIGNATURE_INFO" >/dev/null; then
+              echo "Ad-hoc builds must not enable the hardened runtime." >&2
+              exit 1
+            fi
+          fi
+
+          ACTUAL_VERSION="$(defaults read "$APP_PATH/Contents/Info" CFBundleShortVersionString)"
+          ACTUAL_BUILD="$(defaults read "$APP_PATH/Contents/Info" CFBundleVersion)"
+          ACTUAL_FEED="$(defaults read "$APP_PATH/Contents/Info" SUFeedURL)"
+          ACTUAL_KEY="$(defaults read "$APP_PATH/Contents/Info" SUPublicEDKey)"
+          [[ "$ACTUAL_VERSION" == "${{ steps.metadata.outputs.version }}" ]]
+          [[ "$ACTUAL_BUILD" == "${{ steps.metadata.outputs.build }}" ]]
+          [[ "$ACTUAL_FEED" == "$SPARKLE_FEED_URL" ]]
+          [[ "$ACTUAL_KEY" == "$SPARKLE_PUBLIC_ED_KEY" ]]
+
+      - name: Notarize and staple application
+        if: steps.distribution.outputs.mode == 'developer-id'
+        env:
+          NOTARY_PRIVATE_KEY_BASE64: ${{ secrets.NOTARY_PRIVATE_KEY_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${NOTARY_PRIVATE_KEY_BASE64:?Missing NOTARY_PRIVATE_KEY_BASE64}"
+          : "${NOTARY_KEY_ID:?Missing NOTARY_KEY_ID}"
+          : "${NOTARY_ISSUER_ID:?Missing NOTARY_ISSUER_ID}"
+          APP_PATH="$EXPORT_PATH/ProcessReporter.app"
+          SUBMISSION_ZIP="$RUNNER_TEMP/ProcessReporter-notarization.zip"
+          NOTARY_KEY_PATH="$RUNNER_TEMP/AuthKey_${NOTARY_KEY_ID}.p8"
+
+          printf '%s' "$NOTARY_PRIVATE_KEY_BASE64" | base64 --decode > "$NOTARY_KEY_PATH"
+          chmod 600 "$NOTARY_KEY_PATH"
+          ditto -c -k --keepParent "$APP_PATH" "$SUBMISSION_ZIP"
+          xcrun notarytool submit "$SUBMISSION_ZIP" \
+            --key "$NOTARY_KEY_PATH" \
+            --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER_ID" \
+            --wait
+          xcrun stapler staple "$APP_PATH"
+          xcrun stapler validate "$APP_PATH"
+          spctl --assess --type execute --verbose=2 "$APP_PATH"
+
+      - name: Create DMG
+        env:
+          VERSION: ${{ steps.metadata.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="$EXPORT_PATH/ProcessReporter.app"
+          DMG_ROOT="$RUNNER_TEMP/processreporter-dmg"
+          DMG_MOUNT="$RUNNER_TEMP/processreporter-dmg-mount"
+          DMG_PATH="$DIST_PATH/ProcessReporter-v${VERSION}.dmg"
+
+          rm -rf "$DMG_ROOT" "$DMG_MOUNT"
+          mkdir -p "$DMG_ROOT"
+          ditto "$APP_PATH" "$DMG_ROOT/ProcessReporter.app"
+          ln -s /Applications "$DMG_ROOT/Applications"
+          hdiutil create -fs HFS+ -format UDZO -volname ProcessReporter \
+            -srcfolder "$DMG_ROOT" "$DMG_PATH"
+          hdiutil verify "$DMG_PATH"
+
+          mkdir -p "$DMG_MOUNT"
+          hdiutil attach "$DMG_PATH" -readonly -nobrowse -mountpoint "$DMG_MOUNT"
+          trap 'hdiutil detach "$DMG_MOUNT" >/dev/null' EXIT
+          codesign --verify --deep --strict --verbose=2 \
+            "$DMG_MOUNT/ProcessReporter.app"
+          MOUNTED_ARCHITECTURES="$(lipo -archs \
+            "$DMG_MOUNT/ProcessReporter.app/Contents/MacOS/ProcessReporter")"
+          [[ " $MOUNTED_ARCHITECTURES " == *" arm64 "* ]]
+          [[ " $MOUNTED_ARCHITECTURES " == *" x86_64 "* ]]
+          hdiutil detach "$DMG_MOUNT"
+          trap - EXIT
+
+      - name: Sign, notarize, and staple DMG
+        if: steps.distribution.outputs.mode == 'developer-id'
+        env:
+          SIGNING_IDENTITY: ${{ steps.signing.outputs.identity }}
+          VERSION: ${{ steps.metadata.outputs.version }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${SIGNING_IDENTITY:?Missing signing identity}"
+          : "${NOTARY_KEY_ID:?Missing NOTARY_KEY_ID}"
+          : "${NOTARY_ISSUER_ID:?Missing NOTARY_ISSUER_ID}"
+          DMG_PATH="$DIST_PATH/ProcessReporter-v${VERSION}.dmg"
+          NOTARY_KEY_PATH="$RUNNER_TEMP/AuthKey_${NOTARY_KEY_ID}.p8"
+
+          codesign --force --sign "$SIGNING_IDENTITY" --timestamp "$DMG_PATH"
+          codesign --verify --verbose=2 "$DMG_PATH"
+
+          xcrun notarytool submit "$DMG_PATH" \
+            --key "$NOTARY_KEY_PATH" \
+            --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER_ID" \
+            --wait
+          xcrun stapler staple "$DMG_PATH"
+          xcrun stapler validate "$DMG_PATH"
+          hdiutil verify "$DMG_PATH"
+          spctl --assess --type open --context context:primary-signature \
+            --verbose=2 "$DMG_PATH"
+
+      - name: Generate and verify Sparkle appcast
+        env:
+          TAG: ${{ steps.metadata.outputs.tag }}
+          VERSION: ${{ steps.metadata.outputs.version }}
+          BUILD_NUMBER: ${{ steps.metadata.outputs.build }}
+          NOTES_FILE: ${{ steps.metadata.outputs.notes_file }}
+          DISTRIBUTION_MODE: ${{ steps.distribution.outputs.mode }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${SPARKLE_PRIVATE_KEY:?Missing SPARKLE_PRIVATE_KEY}"
+          : "${SPARKLE_PUBLIC_ED_KEY:?Missing SPARKLE_PUBLIC_ED_KEY}"
+          UPDATES_PATH="$RUNNER_TEMP/sparkle-updates"
+          DMG_NAME="ProcessReporter-v${VERSION}.dmg"
+          NOTES_NAME="ProcessReporter-v${VERSION}.md"
+          ASSET_BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          GENERATE_APPCAST="$(find "$SOURCE_PACKAGES_PATH" -type f -name generate_appcast -perm -111 | head -n 1)"
+          GENERATE_KEYS="$(find "$SOURCE_PACKAGES_PATH" -type f -name generate_keys -perm -111 | head -n 1)"
+          PRIVATE_KEY_PATH="$RUNNER_TEMP/sparkle-private-key"
+          SPARKLE_ACCOUNT="processreporter-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          test -n "$GENERATE_APPCAST"
+          test -n "$GENERATE_KEYS"
+          mkdir -p "$UPDATES_PATH"
+          cp "$DIST_PATH/$DMG_NAME" "$UPDATES_PATH/$DMG_NAME"
+          {
+            echo "<!-- processreporter-workflow-run: ${GITHUB_RUN_ID} -->"
+            if [[ "$DISTRIBUTION_MODE" == "adhoc" ]]; then
+              echo "<!-- processreporter-signing-mode: ad-hoc -->"
+              echo "> [!WARNING]"
+              echo "> This build is ad-hoc signed and is not notarized by Apple. macOS may require explicit approval on first launch. Because ad-hoc identity is not stable across builds, an update may also require Accessibility permission to be granted again. Integration credentials remain in a permissions-restricted local credential journal until a stable Developer ID build can migrate them to Keychain. Sparkle update archives remain protected by the repository's EdDSA key."
+              echo
+            fi
+            cat "$NOTES_FILE"
+          } > "$UPDATES_PATH/$NOTES_NAME"
+
+          printf '%s' "$SPARKLE_PRIVATE_KEY" > "$PRIVATE_KEY_PATH"
+          chmod 600 "$PRIVATE_KEY_PATH"
+          "$GENERATE_KEYS" --account "$SPARKLE_ACCOUNT" -f "$PRIVATE_KEY_PATH" >/dev/null
+          DERIVED_PUBLIC_KEY="$("$GENERATE_KEYS" --account "$SPARKLE_ACCOUNT" -p)"
+          if [[ "$DERIVED_PUBLIC_KEY" != "$SPARKLE_PUBLIC_ED_KEY" ]]; then
+            echo "SPARKLE_PRIVATE_KEY does not match SPARKLE_PUBLIC_ED_KEY." >&2
+            exit 1
+          fi
+
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | "$GENERATE_APPCAST" \
+            --ed-key-file - \
+            --download-url-prefix "$ASSET_BASE_URL/" \
+            --release-notes-url-prefix "$ASSET_BASE_URL/" \
+            --maximum-deltas 0 \
+            -o "$DIST_PATH/appcast.xml" \
+            "$UPDATES_PATH"
+
+          cp "$UPDATES_PATH/$NOTES_NAME" "$DIST_PATH/$NOTES_NAME"
+          APPCAST_BUILD="$(xmllint --xpath 'string((//*[local-name()="version"])[1])' "$DIST_PATH/appcast.xml")"
+          APPCAST_VERSION="$(xmllint --xpath 'string((//*[local-name()="shortVersionString"])[1])' "$DIST_PATH/appcast.xml")"
+          [[ "$APPCAST_BUILD" == "$BUILD_NUMBER" ]]
+          [[ "$APPCAST_VERSION" == "$VERSION" ]]
+          grep -F "sparkle:edSignature=" "$DIST_PATH/appcast.xml"
+          grep -F "$ASSET_BASE_URL/$DMG_NAME" "$DIST_PATH/appcast.xml"
+          grep -F "$ASSET_BASE_URL/$NOTES_NAME" "$DIST_PATH/appcast.xml"
+
+          (
+            cd "$DIST_PATH"
+            shasum -a 256 "$DMG_NAME" appcast.xml "$NOTES_NAME" > SHA256SUMS.txt
+          )
+
+      - name: Publish GitHub Release atomically from draft
+        id: publish
+        env:
+          TAG: ${{ steps.metadata.outputs.tag }}
+          VERSION: ${{ steps.metadata.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          DMG_PATH="$DIST_PATH/ProcessReporter-v${VERSION}.dmg"
+          NOTES_PATH="$DIST_PATH/ProcessReporter-v${VERSION}.md"
+          RELEASE_BODY_PATH="$RUNNER_TEMP/processreporter-release-body.md"
+          MANIFEST_SHA256="$(shasum -a 256 "$DIST_PATH/SHA256SUMS.txt" | awk '{print $1}')"
+          {
+            cat "$NOTES_PATH"
+            echo
+            echo "<!-- processreporter-manifest-sha256: ${MANIFEST_SHA256} -->"
+          } > "$RELEASE_BODY_PATH"
+          ASSETS=(
+            "$DMG_PATH"
+            "$DIST_PATH/appcast.xml"
+            "$NOTES_PATH"
+            "$DIST_PATH/SHA256SUMS.txt"
+          )
+          REUSED_PUBLIC_RELEASE=false
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            RELEASE_STATE="$(gh release view "$TAG" --json body,isDraft,isPrerelease)"
+            IS_DRAFT="$(jq -r .isDraft <<< "$RELEASE_STATE")"
+            IS_PRERELEASE="$(jq -r .isPrerelease <<< "$RELEASE_STATE")"
+            if [[ "$IS_DRAFT" != "true" ]]; then
+              [[ "$IS_PRERELEASE" == "false" ]]
+              jq -r .body <<< "$RELEASE_STATE" | \
+                grep -F "<!-- processreporter-workflow-run: ${GITHUB_RUN_ID} -->" >/dev/null
+              REUSED_PUBLIC_RELEASE=true
+              echo "Public release from this workflow run already exists; verification will resume."
+            else
+              if [[ "$IS_PRERELEASE" != "false" ]]; then
+                echo "Existing draft is marked as a prerelease; refusing to promote it." >&2
+                exit 1
+              fi
+
+              # A failed prior attempt may have left stale draft assets. Remove the
+              # complete hidden asset set before re-uploading so unrelated bytes can
+              # never become public when the draft is promoted.
+              EXISTING_ASSETS="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
+              while IFS= read -r EXISTING_ASSET; do
+                [[ -z "$EXISTING_ASSET" ]] || \
+                  gh release delete-asset "$TAG" "$EXISTING_ASSET" --yes
+              done <<< "$EXISTING_ASSETS"
+
+              gh release upload "$TAG" "${ASSETS[@]}"
+              gh release edit "$TAG" \
+                --title "ProcessReporter $TAG" \
+                --notes-file "$RELEASE_BODY_PATH"
+            fi
+          else
+            gh release create "$TAG" "${ASSETS[@]}" \
+              --verify-tag \
+              --draft \
+              --title "ProcessReporter $TAG" \
+              --notes-file "$RELEASE_BODY_PATH"
+          fi
+
+          if [[ "$REUSED_PUBLIC_RELEASE" == "false" ]]; then
+            PREPUBLIC_STATE="$(gh release view "$TAG" --json databaseId,isDraft,isPrerelease)"
+            [[ "$(jq -r .isDraft <<< "$PREPUBLIC_STATE")" == "true" ]]
+            [[ "$(jq -r .isPrerelease <<< "$PREPUBLIC_STATE")" == "false" ]]
+            RELEASE_ID="$(jq -r .databaseId <<< "$PREPUBLIC_STATE")"
+            [[ "$RELEASE_ID" =~ ^[0-9]+$ ]]
+            gh api --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+              -F draft=false \
+              -f make_latest=false >/dev/null
+          fi
+          echo "reused_public=$REUSED_PUBLIC_RELEASE" >> "$GITHUB_OUTPUT"
+
+      - name: Verify published release and feed
+        env:
+          TAG: ${{ steps.metadata.outputs.tag }}
+          VERSION: ${{ steps.metadata.outputs.version }}
+          BUILD_NUMBER: ${{ steps.metadata.outputs.build }}
+          DISTRIBUTION_MODE: ${{ steps.distribution.outputs.mode }}
+          REUSED_PUBLIC_RELEASE: ${{ steps.publish.outputs.reused_public }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RELEASE_JSON="$(gh release view "$TAG" --json assets,body,isDraft,isPrerelease,tagName,url)"
+          [[ "$(jq -r .isDraft <<< "$RELEASE_JSON")" == "false" ]]
+          [[ "$(jq -r .isPrerelease <<< "$RELEASE_JSON")" == "false" ]]
+          [[ "$(jq -r .tagName <<< "$RELEASE_JSON")" == "$TAG" ]]
+          [[ "$(jq '.assets | length' <<< "$RELEASE_JSON")" == "4" ]]
+          jq -r .body <<< "$RELEASE_JSON" | \
+            grep -F "<!-- processreporter-workflow-run: ${GITHUB_RUN_ID} -->" >/dev/null
+          if [[ "$DISTRIBUTION_MODE" == "adhoc" ]]; then
+            jq -r .body <<< "$RELEASE_JSON" | \
+              grep -F "<!-- processreporter-signing-mode: ad-hoc -->" >/dev/null
+          fi
+
+          RELEASE_ASSETS="$(jq -r '.assets[].name' <<< "$RELEASE_JSON")"
+          for EXPECTED_ASSET in \
+            "ProcessReporter-v${VERSION}.dmg" \
+            appcast.xml \
+            "ProcessReporter-v${VERSION}.md" \
+            SHA256SUMS.txt
+          do
+            grep -Fx "$EXPECTED_ASSET" <<< "$RELEASE_ASSETS" >/dev/null
+          done
+
+          echo "Published release: $(jq -r .url <<< "$RELEASE_JSON")"
+          PUBLISHED_DIR="$RUNNER_TEMP/published-release"
+          DOWNLOAD_SUCCEEDED=false
+          for ATTEMPT in {1..6}; do
+            rm -rf "$PUBLISHED_DIR"
+            mkdir -p "$PUBLISHED_DIR"
+            if gh release download "$TAG" --dir "$PUBLISHED_DIR"; then
+              DOWNLOAD_SUCCEEDED=true
+              break
+            fi
+            [[ "$ATTEMPT" == "6" ]] || sleep 5
+          done
+          [[ "$DOWNLOAD_SUCCEEDED" == "true" ]]
+          (
+            cd "$PUBLISHED_DIR"
+            shasum -a 256 -c SHA256SUMS.txt
+          )
+          PUBLISHED_MANIFEST_SHA256="$(shasum -a 256 \
+            "$PUBLISHED_DIR/SHA256SUMS.txt" | awk '{print $1}')"
+          jq -r .body <<< "$RELEASE_JSON" | \
+            grep -F "<!-- processreporter-manifest-sha256: ${PUBLISHED_MANIFEST_SHA256} -->" >/dev/null
+          for ASSET_NAME in \
+            "ProcessReporter-v${VERSION}.dmg" \
+            appcast.xml \
+            "ProcessReporter-v${VERSION}.md" \
+            SHA256SUMS.txt
+          do
+            if [[ "$REUSED_PUBLIC_RELEASE" != "true" ]]; then
+              cmp "$PUBLISHED_DIR/$ASSET_NAME" "$DIST_PATH/$ASSET_NAME"
+            fi
+          done
+          hdiutil verify "$PUBLISHED_DIR/ProcessReporter-v${VERSION}.dmg"
+          if [[ "$DISTRIBUTION_MODE" == "developer-id" ]]; then
+            spctl --assess --type open --context context:primary-signature \
+              --verbose=2 "$PUBLISHED_DIR/ProcessReporter-v${VERSION}.dmg"
+          fi
+
+          PUBLISHED_APPCAST="$PUBLISHED_DIR/appcast.xml"
+          PUBLISHED_BUILD="$(xmllint --xpath \
+            'string((//*[local-name()="version"])[1])' "$PUBLISHED_APPCAST")"
+          PUBLISHED_VERSION="$(xmllint --xpath \
+            'string((//*[local-name()="shortVersionString"])[1])' "$PUBLISHED_APPCAST")"
+          [[ "$PUBLISHED_BUILD" == "$BUILD_NUMBER" ]]
+          [[ "$PUBLISHED_VERSION" == "$VERSION" ]]
+          grep -F "/releases/download/${TAG}/ProcessReporter-v${VERSION}.dmg" \
+            "$PUBLISHED_APPCAST" >/dev/null
+          grep -F "/releases/download/${TAG}/ProcessReporter-v${VERSION}.md" \
+            "$PUBLISHED_APPCAST" >/dev/null
+          grep -F "sparkle:edSignature=" "$PUBLISHED_APPCAST" >/dev/null
+
+          semver_greater_than() {
+            local left_major left_minor left_patch
+            local right_major right_minor right_patch
+            IFS=. read -r left_major left_minor left_patch <<< "$1"
+            IFS=. read -r right_major right_minor right_patch <<< "$2"
+            (( left_major > right_major )) && return 0
+            (( left_major < right_major )) && return 1
+            (( left_minor > right_minor )) && return 0
+            (( left_minor < right_minor )) && return 1
+            (( left_patch > right_patch ))
+          }
+
+          load_max_public_release() {
+            local public_releases candidate_tag candidate_id candidate_version
+            local current_release_seen=false
+            if ! public_releases="$(gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq '.[] | select(.draft == false and .prerelease == false) | [.tag_name, (.id | tostring)] | @tsv')"
+            then
+              return 1
+            fi
+
+            MAX_PUBLIC_TAG=""
+            MAX_PUBLIC_RELEASE_ID=""
+            while IFS=$'\t' read -r candidate_tag candidate_id; do
+              [[ "$candidate_tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || continue
+              [[ "$candidate_id" =~ ^[0-9]+$ ]] || continue
+              [[ "$candidate_tag" == "$TAG" ]] && current_release_seen=true
+              candidate_version="${candidate_tag#v}"
+              if [[ -z "$MAX_PUBLIC_TAG" ]] || \
+                semver_greater_than "$candidate_version" "${MAX_PUBLIC_TAG#v}"
+              then
+                MAX_PUBLIC_TAG="$candidate_tag"
+                MAX_PUBLIC_RELEASE_ID="$candidate_id"
+              fi
+            done <<< "$public_releases"
+
+            [[ "$current_release_seen" == "true" && \
+              -n "$MAX_PUBLIC_TAG" && -n "$MAX_PUBLIC_RELEASE_ID" ]]
+          }
+
+          # Per-tag jobs may overlap. Recompute after each promotion so a slower
+          # older release cannot overwrite a newer release that completed first.
+          LATEST_CONVERGED=false
+          FINAL_LATEST_TAG=""
+          for ATTEMPT in {1..6}; do
+            if load_max_public_release; then
+              TARGET_LATEST_RELEASE_ID="$MAX_PUBLIC_RELEASE_ID"
+              if gh api --method PATCH \
+                "repos/${GITHUB_REPOSITORY}/releases/${TARGET_LATEST_RELEASE_ID}" \
+                -f make_latest=true >/dev/null \
+                && load_max_public_release
+              then
+                OBSERVED_MAX_TAG="$MAX_PUBLIC_TAG"
+                if ACTUAL_LATEST_TAG="$(gh api \
+                  "repos/${GITHUB_REPOSITORY}/releases/latest" \
+                  --jq '.tag_name')" \
+                  && [[ "$ACTUAL_LATEST_TAG" == "$OBSERVED_MAX_TAG" ]]
+                then
+                  FINAL_LATEST_TAG="$ACTUAL_LATEST_TAG"
+                  LATEST_CONVERGED=true
+                  break
+                fi
+              fi
+            fi
+            [[ "$ATTEMPT" == "6" ]] || sleep 5
+          done
+          [[ "$LATEST_CONVERGED" == "true" ]]
+
+          SKIP_CURRENT_APPCAST=false
+          if [[ "$FINAL_LATEST_TAG" == "$TAG" ]]; then
+            FEED_PATH="$RUNNER_TEMP/published-appcast.xml"
+            LATEST_FEED_MATCHED=false
+            for ATTEMPT in {1..6}; do
+              if OBSERVED_LATEST_TAG="$(gh api \
+                "repos/${GITHUB_REPOSITORY}/releases/latest" \
+                --jq '.tag_name')" \
+                && [[ "$OBSERVED_LATEST_TAG" != "$TAG" ]] \
+                && [[ "$OBSERVED_LATEST_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
+                && semver_greater_than "${OBSERVED_LATEST_TAG#v}" "$VERSION"
+              then
+                FINAL_LATEST_TAG="$OBSERVED_LATEST_TAG"
+                SKIP_CURRENT_APPCAST=true
+                break
+              fi
+              if curl --fail --silent --show-error --location \
+                --retry 2 --retry-all-errors --retry-delay 2 \
+                "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/appcast.xml" \
+                --output "$FEED_PATH" \
+                && cmp -s "$FEED_PATH" "$PUBLISHED_DIR/appcast.xml"
+              then
+                LATEST_FEED_MATCHED=true
+                break
+              fi
+              [[ "$ATTEMPT" == "6" ]] || sleep 5
+            done
+            [[ "$SKIP_CURRENT_APPCAST" == "true" || \
+              "$LATEST_FEED_MATCHED" == "true" ]]
+          else
+            semver_greater_than "${FINAL_LATEST_TAG#v}" "$VERSION"
+            SKIP_CURRENT_APPCAST=true
+          fi
+
+          if [[ "$SKIP_CURRENT_APPCAST" == "true" ]]; then
+            echo "A higher public release, $FINAL_LATEST_TAG, is latest; skipping current-tag appcast comparison."
+            echo "Latest remains $FINAL_LATEST_TAG; skipped appcast comparison for $TAG." \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Remove temporary signing material
+        if: always()
+        env:
+          KEYCHAIN_PATH: ${{ steps.signing.outputs.keychain_path }}
+        shell: bash
+        run: |
+          set +e
+          if [[ -n "$KEYCHAIN_PATH" ]]; then
+            security default-keychain -d user -s login.keychain-db
+            security list-keychains -d user -s login.keychain-db
+            security delete-keychain "$KEYCHAIN_PATH"
+          fi
+          rm -f "$RUNNER_TEMP/developer-id.p12"
+          rm -f "$RUNNER_TEMP"/AuthKey_*.p8
+          rm -f "$RUNNER_TEMP/sparkle-private-key"

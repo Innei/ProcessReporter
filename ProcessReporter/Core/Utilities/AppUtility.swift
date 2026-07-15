@@ -30,19 +30,23 @@ struct AppInfo {
 }
 
 /// 应用程序工具类，用于处理应用程序信息的获取和转换
-class AppUtility {
+final class AppUtility: @unchecked Sendable {
     // 单例模式
     static let shared = AppUtility()
 
     // 应用信息缓存
     private var appInfoCache: [String: AppInfo] = [:]
+    private let cacheLock = NSLock()
 
     /// 根据 Bundle ID 获取应用信息
     /// - Parameter bundleID: 应用的 Bundle Identifier
     /// - Returns: 包含应用信息的 AppInfo 对象
     func getAppInfo(for bundleID: String) -> AppInfo {
         // 检查缓存
-        if let cachedInfo = appInfoCache[bundleID] {
+        cacheLock.lock()
+        let cachedInfo = appInfoCache[bundleID]
+        cacheLock.unlock()
+        if let cachedInfo {
             return cachedInfo
         }
 
@@ -81,7 +85,9 @@ class AppUtility {
         }
 
         let appInfo = AppInfo(bundleID: bundleID, displayName: displayName, icon: icon, path: path)
+        cacheLock.lock()
         appInfoCache[bundleID] = appInfo
+        cacheLock.unlock()
 
         return appInfo
     }
@@ -126,7 +132,9 @@ class AppUtility {
 
     /// 清除缓存
     func clearCache() {
+        cacheLock.lock()
         appInfoCache.removeAll()
+        cacheLock.unlock()
     }
 
     public static func getBundleIdentifierForPID(_ pid: pid_t) -> String? {

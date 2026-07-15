@@ -8,8 +8,17 @@
 import AppKit
 import SnapKit
 
-class PreferencesIntegrationDiscordView: IntegrationView {
-    private var connectionStatusTimer: Timer?
+private final class DiscordConnectionStatusTimer: @unchecked Sendable {
+    var value: Timer?
+
+    deinit {
+        value?.invalidate()
+    }
+}
+
+@MainActor
+final class PreferencesIntegrationDiscordView: IntegrationView {
+    private let connectionStatusTimer = DiscordConnectionStatusTimer()
     private lazy var enabledCheckbox: NSButton = NSButton(
         checkboxWithTitle: "", target: nil, action: nil)
     private lazy var applicationIdTextField: NSScrollTextField = {
@@ -34,19 +43,6 @@ class PreferencesIntegrationDiscordView: IntegrationView {
         checkboxWithTitle: "", target: nil, action: nil)
     private lazy var showTimestampsCheckbox: NSButton = NSButton(
         checkboxWithTitle: "", target: nil, action: nil)
-
-    private lazy var enableButtonsCheckbox: NSButton = NSButton(
-        checkboxWithTitle: "", target: nil, action: nil)
-    private lazy var buttonLabelTextField: NSScrollTextField = {
-        let tf = NSScrollTextField()
-        tf.placeholderString = "Button Label"
-        return tf
-    }()
-    private lazy var buttonUrlTextField: NSScrollTextField = {
-        let tf = NSScrollTextField()
-        tf.placeholderString = "Button URL (https://...)"
-        return tf
-    }()
 
     private lazy var customLargeImageKeyTextField: NSScrollTextField = {
         let tf = NSScrollTextField()
@@ -108,10 +104,6 @@ class PreferencesIntegrationDiscordView: IntegrationView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    deinit {
-        stopConnectionStatusTimer()
-    }
-
     override func setupUI() {
         super.setupUI()
 
@@ -160,18 +152,6 @@ class PreferencesIntegrationDiscordView: IntegrationView {
             leftView: NSTextField(labelWithString: "Show Timestamps"),
             rightView: showTimestampsCheckbox)
 
-        // Buttons
-        createRowDescription(text: "Buttons (optional, up to 1; Discord supports 2)")
-        createRow(
-            leftView: NSTextField(labelWithString: "Enable Button"),
-            rightView: enableButtonsCheckbox)
-        createRow(
-            leftView: NSTextField(labelWithString: "Button Label"),
-            rightView: buttonLabelTextField)
-        createRow(
-            leftView: NSTextField(labelWithString: "Button URL"),
-            rightView: buttonUrlTextField)
-
         // Debug
         createRowDescription(text: "Debug (updates every 2 seconds)")
         createRow(
@@ -204,10 +184,6 @@ class PreferencesIntegrationDiscordView: IntegrationView {
         customLargeImageKeyTextField.stringValue = cfg.customLargeImageKey
         customLargeImageTextTextField.stringValue = cfg.customLargeImageText
         brandSmallImageKeyTextField.stringValue = cfg.brandSmallImageKey
-        enableButtonsCheckbox.state = cfg.enableButtons ? .on : .off
-        buttonLabelTextField.stringValue = cfg.buttonLabel
-        buttonUrlTextField.stringValue = cfg.buttonUrl
-
         updateConnectionStatus()
     }
 
@@ -224,6 +200,7 @@ class PreferencesIntegrationDiscordView: IntegrationView {
         var cfg = PreferencesDataModel.shared.discordIntegration.value
         cfg.isEnabled = enabledCheckbox.state == .on
         cfg.applicationId = applicationIdTextField.stringValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         cfg.showProcessInfo = processInfoCheckbox.state == .on
         cfg.showMediaInfo = mediaInfoCheckbox.state == .on
         cfg.prioritizeMedia = prioritizeMediaCheckbox.state == .on
@@ -232,9 +209,20 @@ class PreferencesIntegrationDiscordView: IntegrationView {
         cfg.customLargeImageKey = customLargeImageKeyTextField.stringValue
         cfg.customLargeImageText = customLargeImageTextTextField.stringValue
         cfg.brandSmallImageKey = brandSmallImageKeyTextField.stringValue
-        cfg.enableButtons = enableButtonsCheckbox.state == .on
-        cfg.buttonLabel = buttonLabelTextField.stringValue
-        cfg.buttonUrl = buttonUrlTextField.stringValue
+        // The bundled Discord Game SDK has no activity-button fields. Preserve
+        // historical label/URL values for forward compatibility, but never publish
+        // an enabled option that this build cannot honor.
+        cfg.enableButtons = false
+
+        if cfg.isEnabled {
+            guard !cfg.applicationId.isEmpty,
+                  cfg.applicationId.allSatisfy(\.isNumber)
+            else {
+                ToastManager.shared.error("Discord Application ID must contain only digits")
+                return
+            }
+        }
+
         PreferencesDataModel.shared.discordIntegration.accept(cfg)
         ToastManager.shared.success("Saved!")
 		DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
@@ -244,16 +232,16 @@ class PreferencesIntegrationDiscordView: IntegrationView {
     }
 
     private func startConnectionStatusTimer() {
-        connectionStatusTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) {
+        connectionStatusTimer.value = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) {
             [weak self] _ in
-            DispatchQueue.main.async {
+            Task { @MainActor [weak self] in
                 self?.updateConnectionStatus()
             }
         }
     }
 
     private func stopConnectionStatusTimer() {
-        connectionStatusTimer?.invalidate()
-        connectionStatusTimer = nil
+        connectionStatusTimer.value?.invalidate()
+        connectionStatusTimer.value = nil
     }
 }

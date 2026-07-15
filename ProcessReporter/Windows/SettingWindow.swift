@@ -8,31 +8,30 @@
 import AppKit
 import SnapKit
 
-class SettingWindow: NSWindow {
-	private lazy var generalVC = PreferencesGeneralViewController()
+@MainActor
+final class SettingWindow: NSWindow {
+	private static let contentSize = NSSize(width: 900, height: 500)
 
 	private let rootViewController = NSViewController()
-
-	private lazy var defaultFrameSize: NSSize = generalVC.frameSize
 
 	// UserDefaults keys for window position and size
 	private let windowFrameKey = "SettingWindowFrame"
 
 	convenience init() {
 		self.init(
-			contentRect: .zero, styleMask: [.titled, .closable, .miniaturizable],
+			contentRect: NSRect(origin: .zero, size: Self.contentSize),
+			styleMask: [.titled, .closable, .miniaturizable],
 			backing: .buffered, defer: false)
+		rootViewController.view.frame = NSRect(origin: .zero, size: Self.contentSize)
+		rootViewController.preferredContentSize = Self.contentSize
 		contentViewController = rootViewController
 
-		rootViewController.view.frame.size = generalVC.frameSize
-		self.isReleasedWhenClosed = false
+		isReleasedWhenClosed = false
 		title = "Settings"
-
-		positionWindow()
-
 		delegate = self
 
 		loadView()
+		positionWindow()
 		switchToTab(.general)
 	}
 
@@ -65,10 +64,13 @@ class SettingWindow: NSWindow {
 //            centerWindowOnScreen()
 //        }
 #if DEBUG
-		let visibleFrame = NSScreen.main!.visibleFrame
-		setFrame(.init(origin: .init(x: visibleFrame.minX + 20, y: visibleFrame.height / 2 - 500), size: defaultFrameSize), display: true)
+		if let visibleFrame = NSScreen.main?.visibleFrame {
+			setFrameOrigin(.init(
+				x: visibleFrame.minX + 20,
+				y: visibleFrame.midY - frame.height / 2
+			))
+		}
 #else
-		setFrame(.init(origin: .zero, size: defaultFrameSize), display: true)
 		centerWindowOnScreen()
 #endif
 	}
@@ -128,64 +130,24 @@ class SettingWindow: NSWindow {
 			vcType = PreferencesMappingViewController.self
 		}
 		if currentViewController?.isKind(of: vcType.classForCoder()) == true {
+			toolbar?.selectedItemIdentifier = NSToolbarItem.Identifier(rawValue: tab.rawValue)
 			return
 		}
 
 		let vc = vcType.init()
 
-		// 为当前视图创建淡出动画
 		for child in rootViewController.children {
-			let fadeOutAnimation = CASpringAnimation(keyPath: "opacity")
-			fadeOutAnimation.fromValue = 1.0
-			fadeOutAnimation.toValue = 0.0
-			fadeOutAnimation.duration = 0.2
-			fadeOutAnimation.damping = 12
-			fadeOutAnimation.initialVelocity = 5
-			fadeOutAnimation.isRemovedOnCompletion = false
-			fadeOutAnimation.fillMode = .forwards
-
-			child.view.layer?.add(fadeOutAnimation, forKey: "fadeOut")
+			child.view.removeFromSuperview()
+			child.removeFromParent()
 		}
 
-		// 延迟一小段时间后切换视图
-		DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-			guard let self = self else { return }
-
-			// Remove existing view controllers
-			for child in self.rootViewController.children {
-				child.view.removeFromSuperview()
-				child.removeFromParent()
-			}
-
-			// 准备新视图
-			vc.view.alphaValue = 0
-			self.rootViewController.addChild(vc)
-			self.rootViewController.view.addSubview(vc.view)
-			vc.view.snp.makeConstraints { make in
-				make.edges.equalToSuperview()
-			}
-
-			// 为新视图创建淡入动画
-			let fadeInAnimation = CASpringAnimation(keyPath: "opacity")
-			fadeInAnimation.fromValue = 0.0
-			fadeInAnimation.toValue = 1.0
-			fadeInAnimation.duration = 0.2
-			fadeInAnimation.damping = 12
-			fadeInAnimation.initialVelocity = 5
-			fadeInAnimation.isRemovedOnCompletion = false
-			fadeInAnimation.fillMode = .forwards
-
-			vc.view.layer?.add(fadeInAnimation, forKey: "fadeIn")
-			vc.view.alphaValue = 1
-
-			self.toolbar?.selectedItemIdentifier = NSToolbarItem.Identifier(rawValue: tab.rawValue)
-
-			let targetSize =
-				((vc as? SettingWindowProtocol) != nil)
-					? (vc as! SettingWindowProtocol).frameSize : self.defaultFrameSize
-
-			self.adjustFrameForNewContentSize(targetSize)
+		rootViewController.addChild(vc)
+		rootViewController.view.addSubview(vc.view)
+		vc.view.snp.makeConstraints { make in
+			make.edges.equalToSuperview()
 		}
+
+		toolbar?.selectedItemIdentifier = NSToolbarItem.Identifier(rawValue: tab.rawValue)
 	}
 
 	enum TabIdentifier: String {
@@ -203,44 +165,6 @@ class SettingWindow: NSWindow {
 	//        UserDefaults.standard.set(frameData, forKey: windowFrameKey)
 	//    }
 
-	func adjustFrameForNewContentSize(_ contentSize: NSSize) {
-		NSAnimationContext.runAnimationGroup(
-			{ context in
-				context.allowsImplicitAnimation = true
-				context.duration = 0.25
-				context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-
-				let newWindowSize = frameRect(
-					forContentRect: CGRect(origin: .zero, size: contentSize)
-				).size
-				var frame = self.frame
-
-				guard let screen = screen ?? NSScreen.main else { return }
-				let screenFrame = screen.visibleFrame
-
-				// 计算新的窗口位置
-				let newHeight = newWindowSize.height
-
-				// 默认向下调整（保持窗口顶部位置不变）
-				frame.origin.y = frame.origin.y + (frame.height - newHeight)
-
-				// 检查是否会超出屏幕底部
-				if frame.origin.y < screenFrame.origin.y {
-					// 如果会超出屏幕底部，先将窗口底部对齐到屏幕可见区域底部
-					let screenBottom = screenFrame.origin.y
-
-					// 计算需要向上移动的距离
-					let adjustmentNeeded = frame.origin.y - screenBottom // 这是负值，表示超出的距离
-
-					// 设置新的 Y 坐标（窗口底部对齐屏幕可见区域底部，然后向上调整超出的距离）
-					frame.origin.y = self.frame.origin.y + adjustmentNeeded
-				}
-
-				frame.size = newWindowSize
-
-				animator().setFrame(frame, display: true)
-			}, completionHandler: nil)
-	}
 }
 
 extension NSToolbarItem.Identifier {
@@ -316,11 +240,11 @@ extension SettingWindow: NSToolbarDelegate {
 
 extension SettingWindow: NSWindowDelegate {
 	func windowShouldClose(_ sender: NSWindow) -> Bool {
-		SettingWindowManager.shared.closeWindow()
-		return false
+		return true
 	}
 
 	func windowWillClose(_ notification: Notification) {
+		SettingWindowManager.shared.windowDidClose(self)
 		NSApp.setActivationPolicy(.accessory)
 	}
 
@@ -330,8 +254,7 @@ extension SettingWindow: NSWindowDelegate {
 	}
 
 	func windowDidResignKey(_ notification: Notification) {
-		let sender = notification.object as! NSWindow
-		if !sender.isVisible {
+		if let sender = notification.object as? NSWindow, !sender.isVisible {
 			NSApp.setActivationPolicy(.accessory)
 		}
 	}

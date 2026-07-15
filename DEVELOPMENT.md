@@ -18,16 +18,15 @@ This guide provides comprehensive information for developers working on ProcessR
 ### Prerequisites
 
 - **macOS 15.0+** (Sequoia or later)
-- **Xcode 15.0+** with Swift 5.9+
+- **Xcode 16.2+**
 - **Swift Package Manager** (included with Xcode)
 - **Git** for version control
-- **CocoaPods** (optional, if migrating from older versions)
 
 ### Initial Setup
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/yourusername/ProcessReporter.git
+   git clone https://github.com/Innei/ProcessReporter.git
    cd ProcessReporter
    ```
 
@@ -45,7 +44,6 @@ This guide provides comprehensive information for developers working on ProcessR
 4. **Grant permissions**
    - Build and run the app
    - Grant accessibility permissions when prompted
-   - Enable screen recording if needed for window title capture
 
 ### LSP Integration (Optional)
 
@@ -399,16 +397,16 @@ private func createMenuItem(title: String, action: Selector?) -> NSMenuItem {
 
 ### Database Schema Changes
 
-1. **Update schema version** in `Database.swift`
-2. **Add migration**:
-```swift
-private func migrateToVersion2() throws {
-    try db.execute("""
-        ALTER TABLE history 
-        ADD COLUMN media_info TEXT
-    """)
-}
-```
+The persistence layer uses SwiftData, not handwritten SQLite migrations.
+
+1. Preserve the existing `VersionedSchema` as the source schema.
+2. Add a new `VersionedSchema` with a strictly newer `versionIdentifier`.
+3. Append both schemas to `MigrationPlan.schemas` and add an explicit
+   lightweight or custom `MigrationStage`.
+4. Verify migration using a copied store from the previous released version
+   and assert user-visible history, icon records, and row counts.
+5. Propagate migration failures to the user while preserving the original
+   store. Never use store deletion as a migration fallback.
 
 ## Performance Profiling
 
@@ -465,69 +463,54 @@ try database.transaction { db in
 
 ## Release Process
 
-### Pre-release Checklist
+Production releases are prepared by the repository-local
+`$release-processreporter` skill in
+`.agents/skills/release-processreporter/SKILL.md`.
 
-1. **Update version number**:
-   - `Info.plist`: CFBundleShortVersionString
-   - `Info.plist`: CFBundleVersion (build number)
+The skill performs the human- and source-aware work:
 
-2. **Test on clean system**:
-   - Remove app support files
-   - Test first-run experience
-   - Verify permissions requests
+1. Establish the real previous release and select a strictly newer semantic version.
+2. Update `MARKETING_VERSION` and the monotonic `CURRENT_PROJECT_VERSION`.
+3. Write evidence-based notes at `.github/release-notes/vX.Y.Z.md`.
+4. Run Debug, universal Release, strict-concurrency, and metadata checks.
+5. Create a release commit and annotated tag, then atomically push both.
 
-3. **Update documentation**:
-   - README.md with new features
-   - CHANGELOG.md with version notes
-   - API documentation if changed
+The tag-triggered `.github/workflows/release.yml` performs the deterministic
+distribution work: universal archiving, distribution signing, DMG creation,
+Sparkle EdDSA appcast generation, checksums, and draft-to-public GitHub Release
+publication. The workflow publishes only after every validation passes and
+explicitly marks the new release as GitHub `latest`.
 
-### Building for Release
+Apple credentials are optional. If all five Developer ID and notarization
+secrets are absent, the workflow produces an ad-hoc-signed, unnotarized release
+and adds a visible warning to its GitHub and Sparkle release notes. Since the
+ad-hoc identity is not stable across builds, macOS may require Gatekeeper and
+Accessibility approval again. Integration credentials remain in a
+permissions-restricted local credential journal in this mode and are migrated
+to Keychain by the first stable team-signed build.
+If all five are present, the same workflow automatically signs, notarizes, and
+staples the application and DMG. A partial Apple configuration is rejected.
+Leave `REQUIRE_DEVELOPER_ID` unset or `false` for the current no-certificate
+phase. After the first Developer ID release, set this GitHub variable permanently
+to `true` so missing Apple credentials fail instead of silently downgrading the
+release to ad-hoc signing.
 
-1. **Archive the app**:
-   ```bash
-   xcodebuild -project ProcessReporter.xcodeproj \
-              -scheme ProcessReporter \
-              -configuration Release \
-              clean archive \
-              -archivePath ./build/ProcessReporter.xcarchive
-   ```
+The matching `SPARKLE_PRIVATE_KEY` and `SPARKLE_PUBLIC_ED_KEY` secrets remain
+mandatory in both modes. They do not require an Apple developer account and
+protect the authenticity of automatic updates. Generate this pair once, store
+it securely, and never rotate it as part of a routine release.
 
-2. **Export for distribution**:
-   ```bash
-   xcodebuild -exportArchive \
-              -archivePath ./build/ProcessReporter.xcarchive \
-              -exportPath ./build \
-              -exportOptionsPlist ExportOptions.plist
-   ```
+Do not create or replace release assets manually. Configure secrets accessible
+to the GitHub `release` job as listed in the release skill before pushing the
+first production tag.
 
-3. **Notarize the app**:
-   ```bash
-   xcrun notarytool submit ProcessReporter.zip \
-                    --apple-id "your-apple-id" \
-                    --team-id "your-team-id" \
-                    --wait
-   ```
-
-4. **Staple the ticket**:
-   ```bash
-   xcrun stapler staple ProcessReporter.app
-   ```
-
-### Creating DMG
-
-```bash
-# Create DMG for distribution
-create-dmg \
-  --volname "ProcessReporter" \
-  --window-pos 200 120 \
-  --window-size 600 400 \
-  --icon-size 100 \
-  --icon "ProcessReporter.app" 150 150 \
-  --hide-extension "ProcessReporter.app" \
-  --app-drop-link 450 150 \
-  "ProcessReporter.dmg" \
-  "build/"
-```
+Stable team-signed builds store integration credentials in the macOS Keychain.
+Ad-hoc builds retain them in a private Application Support credential journal
+because their signing identity is not stable enough for durable Keychain ACL
+access. Settings exports intentionally omit Slack, MixSpace, and S3 credentials;
+importing such a backup preserves the credentials already stored on the current
+Mac. The first stable team-signed build migrates journaled and legacy
+local-preference values into a versioned Keychain service.
 
 ## Troubleshooting Development Issues
 
@@ -548,10 +531,12 @@ create-dmg \
 ```bash
 # Check code signature
 codesign -dv --verbose=4 ProcessReporter.app
-
-# Re-sign if needed
-codesign --force --deep --sign "Developer ID" ProcessReporter.app
+codesign --verify --deep --strict --verbose=2 ProcessReporter.app
 ```
+
+Do not repair a production artifact with `codesign --deep`. Rebuild it through
+the Release workflow so Xcode signs nested Sparkle components in the correct
+order, then notarizes and staples the final application and DMG.
 
 #### 3. Swift Package Resolution
 
@@ -566,12 +551,15 @@ codesign --force --deep --sign "Developer ID" ProcessReporter.app
 **Problem**: SQLite errors on startup
 **Solution**:
 ```bash
-# Check database integrity
-sqlite3 ~/Library/Application\ Support/ProcessReporter/database.db "PRAGMA integrity_check;"
-
-# Reset database (data loss!)
-rm ~/Library/Application\ Support/ProcessReporter/database.db
+# Inspect a copy; the application intentionally preserves the original store.
+cp -a ~/Library/Application\ Support/dev.innei.ProcessReporterV2/db.store* /tmp/
+sqlite3 /tmp/db.store "PRAGMA integrity_check;"
 ```
+
+The live SwiftData store is
+`~/Library/Application Support/dev.innei.ProcessReporterV2/db.store` with
+possible sidecar files. Do not delete it as a generic recovery step. Preserve
+the complete store set and diagnose the reported initialization error first.
 
 ### Debug Tips
 

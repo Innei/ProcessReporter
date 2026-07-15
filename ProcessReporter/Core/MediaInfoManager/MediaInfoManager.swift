@@ -3,16 +3,16 @@
 // Created by Innei on 2025/4/11.
 
 import AppKit
-import Combine
 import Foundation
 
-public class MediaInfoManager: NSObject {
-  // Callback for when playback state changes
+/// Owns the application-facing media state. Monitoring callbacks and cache
+/// mutations are main-actor isolated; provider work remains on background
+/// queues owned by the individual providers.
+@MainActor
+public final class MediaInfoManager: NSObject {
   public typealias PlaybackStateChangedCallback = (MediaInfo?) -> Void
 
-  // Use JXA as the state authority on modern macOS. media-control remains an
-  // optional enrichment source when it is installed.
-  private static var provider: MediaInfoProvider = {
+  private static let provider: any MediaInfoProvider = {
     if #available(macOS 15.4, *) {
       let jxaProvider = JXAMediaInfoProvider()
       guard CLIMediaInfoProvider.isMediaControlInstalled() else {
@@ -27,86 +27,113 @@ public class MediaInfoManager: NSObject {
     }
   }()
 
-  // Cache the latest media info to avoid synchronous CLI calls on the main thread
   private static var latestInfo: MediaInfo?
-
-  // Store the callback
   private static var playbackStateChangedCallback: PlaybackStateChangedCallback?
-  private static var playbackDebounceCancellable: AnyCancellable?
-  private static let playbackSubject = PassthroughSubject<MediaInfo?, Never>()
+  private static var debounceTask: Task<Void, Never>?
+  private static var monitoringGeneration: UInt64 = 0
+  private static var isMonitoring = false
 
-  // Setup the notification observer
+  /// Registers a callback and starts a fresh monitoring session. Repeated calls
+  /// replace the previous callback and provider session rather than stacking
+  /// timers or observers.
   public static func startMonitoringPlaybackChanges(
     callback: @escaping PlaybackStateChangedCallback
   ) {
+    pauseMonitoringPlaybackChanges()
     playbackStateChangedCallback = callback
+    resumeMonitoringPlaybackChanges()
+  }
 
-    // Debounce rapid notifications
-    playbackDebounceCancellable?.cancel()
-    playbackDebounceCancellable =
-      playbackSubject
-      .debounce(for: .milliseconds(150), scheduler: RunLoop.main)
-      .sink { info in
-        latestInfo = info
-        callback(info)
-      }
+  /// Permanently stops monitoring and releases the registered callback and
+  /// cached media value. Use `pauseMonitoringPlaybackChanges()` for sleep.
+  public static func stopMonitoringPlaybackChanges() {
+    pauseMonitoringPlaybackChanges()
+    playbackStateChangedCallback = nil
+    latestInfo = nil
+  }
+
+  /// Suspends provider resources while retaining the callback and last known
+  /// value so the session can be resumed after system wake.
+  public static func pauseMonitoringPlaybackChanges() {
+    monitoringGeneration &+= 1
+    isMonitoring = false
+    debounceTask?.cancel()
+    debounceTask = nil
+    provider.stopMonitoring()
+  }
+
+  /// Resumes a previously registered session. The operation is idempotent.
+  public static func resumeMonitoringPlaybackChanges() {
+    guard !isMonitoring, playbackStateChangedCallback != nil else { return }
+
+    monitoringGeneration &+= 1
+    let generation = monitoringGeneration
+    isMonitoring = true
 
     provider.startMonitoring { info in
-      playbackSubject.send(info)
-    }
-  }
-
-  // Stop monitoring playback changes
-  public static func stopMonitoringPlaybackChanges() {
-    provider.stopMonitoring()
-    playbackStateChangedCallback = nil
-  }
-
-  // Check if there's an active callback
-  public static func hasActiveCallback() -> Bool {
-    return playbackStateChangedCallback != nil
-  }
-
-  // Restart monitoring with the existing callback (useful after system wake)
-  public static func restartMonitoring() {
-    guard let callback = playbackStateChangedCallback else {
-      return
-    }
-
-    // Stop current monitoring
-    provider.stopMonitoring()
-
-    // Small delay to ensure clean restart
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-      // Recreate debounced sink and restart provider
-      playbackDebounceCancellable?.cancel()
-      playbackDebounceCancellable =
-        playbackSubject
-        .debounce(for: .milliseconds(150), scheduler: RunLoop.main)
-        .sink { info in
-          latestInfo = info
-          callback(info)
-        }
-      provider.startMonitoring { info in
-        playbackSubject.send(info)
+      Task { @MainActor in
+        receive(info, generation: generation)
       }
     }
   }
 
-  public static func getMediaInfo() -> MediaInfo? {
-    // All modern providers may spawn an external process. Never block the UI.
-    if Thread.isMainThread {
-      return latestInfo
-    }
-    return resolve(provider.fetchMediaInfo())
+  public static func hasActiveCallback() -> Bool {
+    playbackStateChangedCallback != nil
   }
 
-  // Async API backed by the serializing actor with timeout and coalescing
-  public static func getMediaInfoAsync(timeout seconds: TimeInterval = 3.0) async throws
+  /// Compatibility entry point for callers that need a complete provider
+  /// restart. Delayed restart work is intentionally avoided so a later stop
+  /// cannot resurrect monitoring.
+  public static func restartMonitoring() {
+    guard playbackStateChangedCallback != nil else { return }
+    pauseMonitoringPlaybackChanges()
+    resumeMonitoringPlaybackChanges()
+  }
+
+  /// Returns only the main-actor cache and therefore never launches or waits
+  /// for an external process on the caller's thread.
+  public static func getMediaInfo() -> MediaInfo? {
+    latestInfo
+  }
+
+  /// Fetches a fresh value through the serial coordinator. Each provider owns
+  /// its bounded process timeout, so timing out one request cannot terminate an
+  /// unrelated monitoring request.
+  public static func getMediaInfoAsync(timeout seconds: TimeInterval = 3) async throws
     -> MediaInfo?
   {
-    let result = try await MediaInfoFetchActor.shared.requestInfo(using: provider, timeout: seconds)
+    let generation = monitoringGeneration
+    let result = try await MediaInfoFetchActor.shared.requestInfo(
+      using: provider,
+      timeout: seconds,
+      scope: generation
+    )
+    guard generation == monitoringGeneration else { throw CancellationError() }
     return resolve(result)
+  }
+
+  private static func receive(_ info: MediaInfo?, generation: UInt64) {
+    guard isMonitoring, generation == monitoringGeneration else { return }
+
+    debounceTask?.cancel()
+    debounceTask = Task { @MainActor in
+      do {
+        try await Task.sleep(nanoseconds: 150_000_000)
+      } catch {
+        return
+      }
+
+      guard
+        !Task.isCancelled,
+        isMonitoring,
+        generation == monitoringGeneration,
+        let callback = playbackStateChangedCallback
+      else { return }
+
+      latestInfo = info
+      callback(info)
+      debounceTask = nil
+    }
   }
 
   private static func resolve(_ result: MediaInfoFetchResult) -> MediaInfo? {
@@ -120,78 +147,91 @@ public class MediaInfoManager: NSObject {
   }
 }
 
-// MARK: - Concurrency-based Media Info Actor
-
-/// Actor that serializes external media info requests, with coalescing,
-/// shared in-flight task, timeout and cancellation support.
+/// Serializes and coalesces explicit media lookups. The synchronous provider
+/// call runs in a detached task; the actor never blocks its own executor.
 actor MediaInfoFetchActor {
   static let shared = MediaInfoFetchActor()
 
-  private var inFlightTask: Task<MediaInfoFetchResult, Error>?
-  private var lastRequestStart: Date?
+  private struct InFlight {
+    let id: UInt64
+    let scope: UInt64
+    let deadlineUptime: TimeInterval
+    let task: Task<MediaInfoFetchResult, Never>
+  }
+
+  private var inFlight: InFlight?
+  private var nextRequestID: UInt64 = 0
+  private var lastCompletionUptime: TimeInterval?
+  private var lastCompletedScope: UInt64?
   private var lastCompletedResult: MediaInfoFetchResult?
   private let coalesceInterval: TimeInterval = 0.2
 
-  enum ErrorType: Swift.Error { case timeout }
+  enum ErrorType: Swift.Error {
+    case timeout
+  }
 
-  /// Request media info via the given provider, ensuring:
-  /// - Serial execution
-  /// - Coalescing within 200ms
-  /// - Returning the same in-flight Task when already running
-  /// - Timeout with external process interruption (for CLI provider)
-  func requestInfo(using provider: MediaInfoProvider, timeout seconds: TimeInterval = 3.0)
-    async throws -> MediaInfoFetchResult
-  {
-    if let task = inFlightTask {
-      return try await task.value
-    }
+  func requestInfo(
+    using provider: any MediaInfoProvider,
+    timeout seconds: TimeInterval = 3,
+    scope: UInt64
+  ) async throws -> MediaInfoFetchResult {
+    try Task.checkCancellation()
+    guard seconds > 0 else { throw ErrorType.timeout }
+    let deadlineUptime = ProcessInfo.processInfo.systemUptime + seconds
 
-    let now = Date()
-    if let last = lastRequestStart {
-      let delta = now.timeIntervalSince(last)
-      if delta < coalesceInterval, let cached = lastCompletedResult {
-        return cached
+    while let current = inFlight {
+      // Sharing is safe only when the existing bounded request is guaranteed
+      // to finish no later than this caller's own deadline.
+      guard current.deadlineUptime <= deadlineUptime else {
+        throw ErrorType.timeout
       }
-      if delta < coalesceInterval {
-        let remaining = coalesceInterval - delta
-        let ns = UInt64(max(0, remaining) * 1_000_000_000)
-        try? await Task.sleep(nanoseconds: ns)
+      let result = await current.task.value
+      if current.scope == scope {
+        try Task.checkCancellation()
+        return result
       }
-    }
 
-    lastRequestStart = Date()
-
-    let task = Task<MediaInfoFetchResult, Error> {
-      // Run provider.fetchMediaInfo() concurrently with a timeout task
-      try await withThrowingTaskGroup(of: MediaInfoFetchResult.self) { group in
-        group.addTask {
-          // Run on a background thread, not on the actor
-          return provider.fetchMediaInfo()
-        }
-        group.addTask {
-          try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-          throw ErrorType.timeout
-        }
-
-        do {
-          let result = try await group.next()!
-          group.cancelAll()
-          return result
-        } catch {
-          group.cancelAll()
-          provider.cancelCurrentRequest()
-          throw error
-        }
+      // A lifecycle transition occurred while the old request was running.
+      // Wait for its bounded completion, then perform a fresh lookup rather
+      // than returning a pre-sleep/pre-stop value to the new session.
+      if inFlight?.id == current.id {
+        inFlight = nil
       }
+      try Task.checkCancellation()
     }
 
-    inFlightTask = task
-    defer {
-      inFlightTask = nil
-      lastRequestStart = Date()
+    let now = ProcessInfo.processInfo.systemUptime
+    if let lastCompletionUptime,
+      now - lastCompletionUptime < coalesceInterval,
+      lastCompletedScope == scope,
+      let lastCompletedResult
+    {
+      return lastCompletedResult
     }
-    let result = try await task.value
-    lastCompletedResult = result
+
+    nextRequestID &+= 1
+    let requestID = nextRequestID
+    let remaining = deadlineUptime - ProcessInfo.processInfo.systemUptime
+    guard remaining > 0 else { throw ErrorType.timeout }
+    let task = Task.detached(priority: .utility) {
+      provider.fetchMediaInfo(timeout: remaining)
+    }
+    inFlight = InFlight(
+      id: requestID,
+      scope: scope,
+      deadlineUptime: deadlineUptime,
+      task: task
+    )
+
+    let result = await task.value
+    if inFlight?.id == requestID {
+      inFlight = nil
+      lastCompletionUptime = ProcessInfo.processInfo.systemUptime
+      lastCompletedScope = scope
+      lastCompletedResult = result
+    }
+
+    try Task.checkCancellation()
     return result
   }
 }

@@ -4,23 +4,57 @@
 //
 //  Created by Innei on 2025/4/12.
 //
-import SystemConfiguration
+
+import Foundation
+import Network
+
+private final class NetworkAvailabilityMonitor: @unchecked Sendable {
+    static let shared = NetworkAvailabilityMonitor()
+
+    private let monitor = NWPathMonitor()
+    private let monitorQueue = DispatchQueue(label: "processreporter.network-path")
+    private let lock = NSLock()
+    private var status: NWPath.Status?
+
+    private init() {
+        monitor.pathUpdateHandler = { [weak self] path in
+            guard let self else { return }
+            self.lock.lock()
+            self.status = path.status
+            self.lock.unlock()
+        }
+        monitor.start(queue: monitorQueue)
+    }
+
+    deinit {
+        monitor.cancel()
+    }
+
+    var isAvailable: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+
+        // NWPathMonitor publishes asynchronously. Until the first path is known,
+        // allow the real request to decide instead of dropping startup reports.
+        // A path requiring a connection may also become usable on demand.
+        return status != .unsatisfied
+    }
+}
 
 func isNetworkAvailable() -> Bool {
-    var zeroAddress = sockaddr_in()
-    zeroAddress.sin_len = UInt8(MemoryLayout.size(ofValue: zeroAddress))
-    zeroAddress.sin_family = sa_family_t(AF_INET)
+    NetworkAvailabilityMonitor.shared.isAvailable
+}
 
-    let defaultRouteReachability = withUnsafePointer(to: &zeroAddress) {
-        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { zeroSockAddress in
-            SCNetworkReachabilityCreateWithAddress(nil, zeroSockAddress)
-        }
+/// Accepts only literal loopback names and addresses. Prefix matching is not
+/// sufficient here because a hostname such as `127.attacker.example` is a
+/// public DNS name even though it begins with the loopback network number.
+func isLoopbackHost(_ host: String) -> Bool {
+    let normalized = host.lowercased()
+    if normalized == "localhost" || normalized == "[::1]" || normalized == "::1" {
+        return true
     }
 
-    var flags = SCNetworkReachabilityFlags()
-    if !SCNetworkReachabilityGetFlags(defaultRouteReachability!, &flags) {
-        return false
-    }
-
-    return flags.contains(.reachable) && !flags.contains(.connectionRequired)
+    let octets = normalized.split(separator: ".", omittingEmptySubsequences: false)
+    guard octets.count == 4, octets.first == "127" else { return false }
+    return octets.allSatisfy { UInt8($0) != nil }
 }

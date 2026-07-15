@@ -10,7 +10,8 @@ import os.log
 import ServiceManagement
 import SnapKit
 
-class PreferencesGeneralViewController: NSViewController, SettingWindowProtocol {
+@MainActor
+final class PreferencesGeneralViewController: NSViewController, SettingWindowProtocol {
     private let logger = Logger()
     final let frameSize: NSSize = .init(width: 600, height: 320)
 
@@ -48,7 +49,7 @@ class PreferencesGeneralViewController: NSViewController, SettingWindowProtocol 
     }
 
     private func synchronizeUI() {
-        enabledButton.state = PreferencesDataModel.shared.isEnabled.value ? .on : .off
+        enabledButton.state = PreferencesDataModel.shared.reportingAllowed ? .on : .off
         intervalPopup.selectItem(
             withTitle: PreferencesDataModel.shared.sendInterval.value.toString())
         focusReportButton.state = PreferencesDataModel.shared.focusReport.value ? .on : .off
@@ -68,7 +69,7 @@ class PreferencesGeneralViewController: NSViewController, SettingWindowProtocol 
         gridView.snp.makeConstraints { make in
             make.centerX.equalToSuperview()
             make.top.equalToSuperview().offset(40)
-            make.width.lessThanOrEqualToSuperview().inset(40)
+            make.width.lessThanOrEqualTo(560)
         }
 
         // Enabled checkbox
@@ -180,13 +181,22 @@ extension PreferencesGeneralViewController {
 
 extension PreferencesGeneralViewController {
     @objc private func switchInterval(sender: NSPopUpButton) {
-        let label = sender.itemTitles[sender.indexOfSelectedItem]
+        guard let label = sender.selectedItem?.title,
+              let interval = SendInterval.labelToValue(label)
+        else { return }
         PreferencesDataModel.shared.sendInterval.accept(
-            SendInterval.labelToValue(label) ?? .tenSeconds)
+            interval)
     }
 
     @objc private func enabledButtonClicked(sender: NSButton) {
-        PreferencesDataModel.shared.isEnabled.accept(sender.state == .on)
+        let requestedValue = sender.state == .on
+        guard PreferencesDataModel.shared.setReportingEnabled(requestedValue) else {
+            sender.state = .off
+            ToastManager.shared.warning(
+                "Reporting remains paused until the credential store is recovered"
+            )
+            return
+        }
     }
 
     @objc private func focusReportButtonClicked(sender: NSButton) {
@@ -198,18 +208,30 @@ extension PreferencesGeneralViewController {
 
         do {
             if isOn {
-                if SMAppService.mainApp.status == .enabled {
-                    try? SMAppService.mainApp.unregister()
+                switch SMAppService.mainApp.status {
+                case .enabled:
+                    break
+                case .requiresApproval:
+                    ToastManager.shared.warning(
+                        "Allow ProcessReporter in System Settings > General > Login Items")
+                default:
+                    try SMAppService.mainApp.register()
                 }
-
-                try SMAppService.mainApp.register()
             } else {
-                try SMAppService.mainApp.unregister()
+                switch SMAppService.mainApp.status {
+                case .notRegistered, .notFound:
+                    break
+                default:
+                    try SMAppService.mainApp.unregister()
+                }
             }
+            sender.state = checkWasLaunchedAtLogin() ? .on : .off
         } catch {
             logger.error(
                 "Failed to \(isOn ? "enable" : "disable") launch at login: \(error.localizedDescription)"
             )
+            sender.state = checkWasLaunchedAtLogin() ? .on : .off
+            ToastManager.shared.error("Could not update launch at login: \(error.localizedDescription)")
         }
     }
 
@@ -249,33 +271,25 @@ extension PreferencesGeneralViewController {
 
         let fileName = "ProcessReporterData.plist"
 
-        let data = PreferencesDataModel.shared.exportToPlist()
-        guard let data = data else { return }
+        guard let data = PreferencesDataModel.shared.exportToPlist() else {
+            ToastManager.shared.error("Export failed: Settings could not be encoded")
+            return
+        }
 
         if openPanel.runModal() == .OK {
             guard let selectedURL = openPanel.url else {
                 return
             }
 
-            let fileManager = FileManager.default
             let filePathURL = selectedURL.appendingPathComponent(fileName)
-            let filePath = filePathURL.path
 
             do {
-                // 检查文件是否已存在
-                if fileManager.fileExists(atPath: filePath) {
-                    try fileManager.removeItem(atPath: filePath)
-                }
-
+                // Atomic writing preserves the existing backup if the new write fails.
                 try data.write(to: filePathURL, options: [.atomic])
-
-                print("文件创建成功，路径: \(filePath)")
-
+                ToastManager.shared.success("Settings exported successfully; credentials were excluded")
             } catch {
-                print("创建文件失败: \(error.localizedDescription)")
+                ToastManager.shared.error("Export failed: \(error.localizedDescription)")
             }
-        } else {
-            print("用户取消了选择")
         }
     }
 
@@ -300,11 +314,34 @@ extension PreferencesGeneralViewController {
 
         do {
             let data = try Data(contentsOf: selectedURL)
-            if PreferencesDataModel.importFromPlist(data: data) {
-                ToastManager.shared.success("Import successfully")
-                synchronizeUI()
-            } else {
-                ToastManager.shared.error("Import failed: Invalid data format")
+            SettingsMutationCoordinator.shared.enqueue { [self] in
+                switch await PreferencesDataModel.importFromPlist(data: data) {
+                case let .success(integrationsRequiringReview, ignoredFields):
+                    var warnings: [String] = []
+                    if !integrationsRequiringReview.isEmpty {
+                        warnings.append(
+                            "Review changed destinations before re-enabling "
+                                + integrationsRequiringReview.joined(separator: " and ")
+                                + "."
+                        )
+                    }
+                    if !ignoredFields.isEmpty {
+                        warnings.append(
+                            "Ignored invalid fields: "
+                                + ignoredFields.joined(separator: ", ")
+                                + "."
+                        )
+                    }
+
+                    if warnings.isEmpty {
+                        ToastManager.shared.success("Settings imported successfully")
+                    } else {
+                        ToastManager.shared.warning("Settings imported. " + warnings.joined(separator: " "))
+                    }
+                    synchronizeUI()
+                case .invalid:
+                    ToastManager.shared.error("Import failed: Invalid data format")
+                }
             }
         } catch {
             ToastManager.shared.error("Import failed: \(error.localizedDescription)")

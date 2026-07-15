@@ -7,6 +7,7 @@
 
 import Foundation
 
+@MainActor
 protocol SettingWindowProtocol {
     var frameSize: NSSize { get }
 }

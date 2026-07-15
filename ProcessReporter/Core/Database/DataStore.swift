@@ -5,12 +5,11 @@
 //  Created by Innei on 2025/8/26.
 //
 
-import Foundation
-import SwiftData
-import AppKit
+@preconcurrency import Foundation
+@preconcurrency import SwiftData
 
 // Value object used to persist reports without exposing SwiftData models
-struct ReportValue {
+struct ReportValue: Sendable {
     var id: UUID
     var processName: String?
     var windowTitle: String?
@@ -21,12 +20,10 @@ struct ReportValue {
     var mediaProcessName: String?
     var mediaDuration: Double?
     var mediaElapsedTime: Double?
-    var mediaImageData: Data?
-
     var integrations: [String]
 }
 
-struct IconValue {
+struct IconValue: Sendable {
     var name: String
     var applicationIdentifier: String
     var url: String
@@ -38,7 +35,7 @@ struct IconValue {
 actor DataStore {
     static let shared = DataStore()
 
-    // Maximum number of reports to keep (roughly ~10MB with typical report sizes)
+    // Maximum number of reports to keep.
     private let maxReportCount = 5000
 
     // Initialize underlying database/container
@@ -51,13 +48,8 @@ actor DataStore {
     func iconURL(for bundleID: String) async -> String? {
         do {
             return try await Database.shared.performBackgroundTask { context in
-                let descriptor = FetchDescriptor<IconModel>(
-                    predicate: #Predicate<IconModel> { icon in
-                        icon.applicationIdentifier == bundleID
-                    }
-                )
-                let results = try context.fetch(descriptor)
-                return results.first?.url
+                let models = try context.fetch(FetchDescriptor<IconModel>())
+                return models.first { $0.applicationIdentifier == bundleID }?.url
             }
         } catch {
             NSLog("iconURL lookup failed: \(error.localizedDescription)")
@@ -70,55 +62,45 @@ actor DataStore {
     }
 
     func upsertIcon(name: String, url: String, bundleID: String) async throws {
-        try await Database.shared.performBackgroundTask { context in
-            let descriptor = FetchDescriptor<IconModel>(
-                predicate: #Predicate<IconModel> { icon in
-                    icon.applicationIdentifier == bundleID
-                }
-            )
-            let results = try context.fetch(descriptor)
-            if let existing = results.first {
-                if existing.url != url {
-                    existing.url = url
-                    existing.updatedAt = .now
-                }
+        let didChange = try await Database.shared.performBackgroundTask { context in
+            let models = try context.fetch(FetchDescriptor<IconModel>())
+            if let existing = models.first(where: { $0.applicationIdentifier == bundleID }) {
+                guard existing.url != url || existing.name != name else { return false }
+                existing.url = url
+                existing.name = name
+                existing.updatedAt = .now
             } else {
                 let newIcon = IconModel(name: name, url: url, applicationIdentifier: bundleID)
                 context.insert(newIcon)
             }
             try context.save()
+            return true
         }
+        guard didChange else { return }
         NotificationCenter.default.post(name: DataStore.changedNotification, object: nil)
     }
 
     // MARK: - Reports
 
-    func saveReport(_ report: ReportValue) async {
-        do {
-            try await Database.shared.performBackgroundTask { context in
-                let model = ReportModel(
-                    windowInfo: nil,
-                    integrations: report.integrations,
-                    mediaInfo: nil
-                )
-                // Copy fields
-                model.id = report.id
-                model.processName = report.processName
-                model.windowTitle = report.windowTitle
-                model.timeStamp = report.timeStamp
-                model.artist = report.artist
-                model.mediaName = report.mediaName
-                model.mediaProcessName = report.mediaProcessName
-                model.mediaDuration = report.mediaDuration
-                model.mediaElapsedTime = report.mediaElapsedTime
-                model.mediaImageData = report.mediaImageData
+    func saveReport(_ report: ReportValue) async throws {
+        try await Database.shared.performBackgroundTask { context in
+            let model = ReportModel(
+                windowInfo: nil,
+                integrations: report.integrations,
+                mediaInfo: nil
+            )
+            model.id = report.id
+            model.processName = report.processName
+            model.windowTitle = report.windowTitle
+            model.timeStamp = report.timeStamp
+            model.artist = report.artist
+            model.mediaName = report.mediaName
+            model.mediaProcessName = report.mediaProcessName
+            model.mediaDuration = report.mediaDuration
+            model.mediaElapsedTime = report.mediaElapsedTime
 
-                context.insert(model)
-                try context.save()
-            }
-        } catch {
-            NSLog("Failed to save report: \(error.localizedDescription)")
-            return
+            context.insert(model)
+            try context.save()
         }
         NotificationCenter.default.post(name: DataStore.changedNotification, object: nil)
 
@@ -127,22 +109,39 @@ actor DataStore {
     }
 
     // Fetch all icons sorted (value type only)
-    enum IconSortKey { case name, applicationIdentifier, url }
+    enum IconSortKey: Sendable { case name, applicationIdentifier, url }
     func fetchIconsSorted(by key: IconSortKey, ascending: Bool) async -> [IconValue] {
         do {
             return try await Database.shared.performBackgroundTask { context in
-                let sort: [SortDescriptor<IconModel>]
-                switch key {
-                case .name:
-                    sort = [SortDescriptor(\.name, order: ascending ? .forward : .reverse)]
-                case .applicationIdentifier:
-                    sort = [SortDescriptor(\.applicationIdentifier, order: ascending ? .forward : .reverse)]
-                case .url:
-                    sort = [SortDescriptor(\.url, order: ascending ? .forward : .reverse)]
+                let models = try context.fetch(FetchDescriptor<IconModel>())
+                let values = models.map {
+                    IconValue(
+                        name: $0.name,
+                        applicationIdentifier: $0.applicationIdentifier,
+                        url: $0.url,
+                        createdAt: $0.createdAt,
+                        updatedAt: $0.updatedAt
+                    )
                 }
-                let descriptor = FetchDescriptor<IconModel>(sortBy: sort)
-                let models = try context.fetch(descriptor)
-                return models.map { IconValue(name: $0.name, applicationIdentifier: $0.applicationIdentifier, url: $0.url, createdAt: $0.createdAt, updatedAt: $0.updatedAt) }
+                return values.sorted { lhs, rhs in
+                    let comparison: ComparisonResult
+                    switch key {
+                    case .name:
+                        comparison = lhs.name.compare(rhs.name)
+                    case .applicationIdentifier:
+                        comparison = lhs.applicationIdentifier.compare(rhs.applicationIdentifier)
+                    case .url:
+                        comparison = lhs.url.compare(rhs.url)
+                    }
+                    if comparison == .orderedSame {
+                        return ascending
+                            ? lhs.applicationIdentifier < rhs.applicationIdentifier
+                            : lhs.applicationIdentifier > rhs.applicationIdentifier
+                    }
+                    return ascending
+                        ? comparison == .orderedAscending
+                        : comparison == .orderedDescending
+                }
             }
         } catch {
             NSLog("fetchIconsSorted failed: \(error.localizedDescription)")
@@ -152,13 +151,8 @@ actor DataStore {
 
     func deleteIcon(applicationIdentifier: String) async throws {
         try await Database.shared.performBackgroundTask { context in
-            let descriptor = FetchDescriptor<IconModel>(
-                predicate: #Predicate<IconModel> { icon in
-                    icon.applicationIdentifier == applicationIdentifier
-                }
-            )
-            let results = try context.fetch(descriptor)
-            for obj in results {
+            let models = try context.fetch(FetchDescriptor<IconModel>())
+            for obj in models where obj.applicationIdentifier == applicationIdentifier {
                 context.delete(obj)
             }
             try context.save()
@@ -167,58 +161,24 @@ actor DataStore {
     }
 
     // Reports fetching with pagination and optional search
-    func fetchReports(searchText: String? = nil, offset: Int, limit: Int, ascending: Bool) async -> [ReportValue] {
+    func fetchReports(
+        searchText: String? = nil,
+        offset: Int,
+        limit: Int,
+        ascending: Bool
+    ) async -> [ReportValue] {
+        guard limit > 0 else { return [] }
+
         do {
-            return try await Database.shared.performBackgroundTask { context in
-                let sort = [SortDescriptor<ReportModel>(\.timeStamp, order: ascending ? .forward : .reverse)]
-                if let q = searchText, !q.isEmpty {
-                    // Fetch all, filter in memory, then paginate (keeps simplicity and avoids predicate portability issues)
-                    let all = try context.fetch(FetchDescriptor<ReportModel>(sortBy: sort))
-                    let lowercased = q.lowercased()
-                    let filtered = all.filter { m in
-                        if let pn = m.processName?.lowercased(), pn.contains(lowercased) { return true }
-                        if let mn = m.mediaName?.lowercased(), mn.contains(lowercased) { return true }
-                        if let ar = m.artist?.lowercased(), ar.contains(lowercased) { return true }
-                        return false
-                    }
-                    let slice = filtered.dropFirst(offset).prefix(limit)
-                    return slice.map { m in
-                        ReportValue(
-                            id: m.id,
-                            processName: m.processName,
-                            windowTitle: m.windowTitle,
-                            timeStamp: m.timeStamp,
-                            artist: m.artist,
-                            mediaName: m.mediaName,
-                            mediaProcessName: m.mediaProcessName,
-                            mediaDuration: m.mediaDuration,
-                            mediaElapsedTime: m.mediaElapsedTime,
-                            mediaImageData: m.mediaImageData,
-                            integrations: m.integrations
-                        )
-                    }
-                } else {
-                    var descriptor = FetchDescriptor<ReportModel>(sortBy: sort)
-                    descriptor.fetchOffset = offset
-                    descriptor.fetchLimit = limit
-                    let page = try context.fetch(descriptor)
-                    return page.map { m in
-                        ReportValue(
-                            id: m.id,
-                            processName: m.processName,
-                            windowTitle: m.windowTitle,
-                            timeStamp: m.timeStamp,
-                            artist: m.artist,
-                            mediaName: m.mediaName,
-                            mediaProcessName: m.mediaProcessName,
-                            mediaDuration: m.mediaDuration,
-                            mediaElapsedTime: m.mediaElapsedTime,
-                            mediaImageData: m.mediaImageData,
-                            integrations: m.integrations
-                        )
-                    }
-                }
-            }
+            try Task.checkCancellation()
+            return try await Database.shared.fetchReportValues(
+                searchText: searchText,
+                offset: offset,
+                limit: limit,
+                ascending: ascending
+            )
+        } catch is CancellationError {
+            return []
         } catch {
             NSLog("fetchReports failed: \(error.localizedDescription)")
             return []
@@ -236,12 +196,10 @@ actor DataStore {
     // MARK: - Maintenance
 
     func flush() async {
-        await MainActor.run {
-            Task { @MainActor in
-                if let context = await Database.shared.mainContext {
-                    try? context.save()
-                }
-            }
+        do {
+            try await Database.shared.saveMainContext()
+        } catch {
+            NSLog("Failed to flush database: \(error.localizedDescription)")
         }
     }
 
@@ -249,35 +207,9 @@ actor DataStore {
 
     func cleanupOldRecordsIfNeeded() async {
         do {
-            let deletedCount = try await Database.shared.performBackgroundTask { [maxReportCount] context in
-                // Get total count
-                let countDescriptor = FetchDescriptor<ReportModel>()
-                let totalCount = try context.fetchCount(countDescriptor)
-
-                guard totalCount > maxReportCount else { return 0 }
-
-                let deleteCount = totalCount - maxReportCount
-
-                // Find the cutoff timestamp: get the Nth oldest record's timestamp
-                var cutoffDescriptor = FetchDescriptor<ReportModel>(
-                    sortBy: [SortDescriptor(\.timeStamp, order: .forward)]
-                )
-                cutoffDescriptor.fetchLimit = 1
-                cutoffDescriptor.fetchOffset = deleteCount - 1
-
-                guard let cutoffReport = try context.fetch(cutoffDescriptor).first else {
-                    return 0
-                }
-                let cutoffDate = cutoffReport.timeStamp
-
-                // Delete all records older than or equal to cutoff date in one operation
-                try context.delete(model: ReportModel.self, where: #Predicate<ReportModel> { report in
-                    report.timeStamp <= cutoffDate
-                })
-
-                try context.save()
-                return deleteCount
-            }
+            let deletedCount = try await Database.shared.trimReports(
+                toMaximumCount: maxReportCount
+            )
 
             if deletedCount > 0 {
                 NSLog("Cleaned up \(deletedCount) old reports")
@@ -303,4 +235,115 @@ actor DataStore {
 
 extension DataStore {
     static let changedNotification = Notification.Name("DataStoreChangedNotification")
+
+    fileprivate static func reportHistoryProperties() -> [PartialKeyPath<ReportModel>] {
+        [
+            \.id,
+            \.processName,
+            \.windowTitle,
+            \.timeStamp,
+            \.artist,
+            \.mediaName,
+            \.mediaProcessName,
+            \.mediaDuration,
+            \.mediaElapsedTime,
+            \.integrationsData,
+        ]
+    }
+
+    fileprivate static func reportValue(_ model: ReportModel) -> ReportValue {
+        ReportValue(
+            id: model.id,
+            processName: model.processName,
+            windowTitle: model.windowTitle,
+            timeStamp: model.timeStamp,
+            artist: model.artist,
+            mediaName: model.mediaName,
+            mediaProcessName: model.mediaProcessName,
+            mediaDuration: model.mediaDuration,
+            mediaElapsedTime: model.mediaElapsedTime,
+            integrations: model.integrations
+        )
+    }
+}
+
+extension Database {
+    func fetchReportValues(
+        searchText: String?,
+        offset: Int,
+        limit: Int,
+        ascending: Bool
+    ) throws -> [ReportValue] {
+        try Task.checkCancellation()
+        let context = try createBackgroundContext()
+        let order: SortOrder = ascending ? .forward : .reverse
+        let sort = [
+            SortDescriptor<ReportModel>(\.timeStamp, order: order),
+            SortDescriptor<ReportModel>(\.id, order: order),
+        ]
+        var descriptor = FetchDescriptor<ReportModel>(sortBy: sort)
+        descriptor.propertiesToFetch = DataStore.reportHistoryProperties()
+
+        let safeOffset = max(0, offset)
+        let safeLimit = max(0, limit)
+        guard let query = searchText, !query.isEmpty else {
+            // The common history path must remain database-paginated. Fetching
+            // and sorting all 5,000 rows for every page delays report writes on
+            // the same actor and makes infinite scrolling progressively slower.
+            descriptor.fetchOffset = safeOffset
+            descriptor.fetchLimit = safeLimit
+            let page = try context.fetch(descriptor)
+            try Task.checkCancellation()
+            return page.map(DataStore.reportValue)
+        }
+
+        // SwiftData does not provide a portable case-insensitive contains
+        // predicate for these optional fields. Search the bounded history in
+        // memory, but stop promptly when a newer query cancels this task.
+        let models = try context.fetch(descriptor)
+        try Task.checkCancellation()
+        let lowercasedQuery = query.lowercased()
+        var skippedMatches = 0
+        var results: [ReportValue] = []
+        results.reserveCapacity(min(safeLimit, models.count))
+
+        for (index, model) in models.enumerated() {
+            if index.isMultiple(of: 64) {
+                try Task.checkCancellation()
+            }
+            let matches = model.processName?.lowercased().contains(lowercasedQuery) == true
+                || model.mediaName?.lowercased().contains(lowercasedQuery) == true
+                || model.artist?.lowercased().contains(lowercasedQuery) == true
+            guard matches else { continue }
+            if skippedMatches < safeOffset {
+                skippedMatches += 1
+                continue
+            }
+            results.append(DataStore.reportValue(model))
+            if results.count == safeLimit { break }
+        }
+        return results
+    }
+
+    func trimReports(toMaximumCount maximumCount: Int) throws -> Int {
+        let context = try createBackgroundContext()
+        let totalCount = try context.fetchCount(FetchDescriptor<ReportModel>())
+        guard totalCount > maximumCount else { return 0 }
+
+        let deleteCount = totalCount - maximumCount
+        // Delete exactly the excess rows. A timestamp predicate could remove
+        // more than requested when multiple reports share the same timestamp.
+        var descriptor = FetchDescriptor<ReportModel>(sortBy: [
+            SortDescriptor(\.timeStamp, order: .forward),
+            SortDescriptor(\.id, order: .forward),
+        ])
+        descriptor.propertiesToFetch = [\.id, \.timeStamp]
+        descriptor.fetchLimit = deleteCount
+        let oldestReports = try context.fetch(descriptor)
+        for report in oldestReports {
+            context.delete(report)
+        }
+        try context.save()
+        return oldestReports.count
+    }
 }

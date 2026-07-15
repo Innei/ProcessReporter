@@ -112,6 +112,7 @@ struct ApplicationTableView: View {
                     }) {
                         Image(systemName: "plus").bold()
                     }
+                    .accessibilityLabel("Add application")
                     .buttonStyle(.plain)
                     .frame(width: 16, height: 16)
 
@@ -123,6 +124,7 @@ struct ApplicationTableView: View {
                     }) {
                         Image(systemName: "minus").bold()
                     }
+                    .accessibilityLabel("Remove selected applications")
                     .buttonStyle(.plain)
                     .disabled(selectedProcessItems.isEmpty)
                     .frame(width: 16, height: 16)
@@ -184,7 +186,7 @@ struct ApplicationTableView: View {
         let image = Image(nsImage: nsImage)
 
         // Check if app already exists in the list
-        if !appItems.contains(where: { $0.name == url.deletingPathExtension().lastPathComponent }) {
+        if !appItems.contains(where: { $0.applicationIdentifier == appId }) {
             let appName = url.deletingPathExtension().lastPathComponent
             appItems.append(AppItem(applicationIdentifier: appId, name: appName, icon: image))
             saveFilteredApps()

@@ -17,7 +17,7 @@ struct DiscordDebugSnapshot {
     var isConnected: Bool = false
 }
 
-final class DiscordDebugStore {
+final class DiscordDebugStore: @unchecked Sendable {
     static let shared = DiscordDebugStore()
 
     private let queue = DispatchQueue(label: "processreporter.discord.debug.store")
