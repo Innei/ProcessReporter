@@ -5,7 +5,7 @@ description: Prepare and publish a production ProcessReporter macOS release. Use
 
 # Release ProcessReporter
 
-Produce one auditable release commit and annotated tag. Let GitHub Actions own the deterministic universal build, distribution signing mode, DMG creation, Sparkle EdDSA appcast, and GitHub Release publication. Developer ID signing and notarization are preferred but optional until Apple credentials are available.
+Produce one auditable release commit and annotated tag. Let GitHub Actions own the deterministic Apple Silicon arm64 build, distribution signing mode, DMG creation, Sparkle EdDSA appcast, and GitHub Release publication. Developer ID signing and notarization are preferred but optional until Apple credentials are available.
 
 ## Safety contract
 
@@ -90,12 +90,12 @@ Run the repository's focused checks, at minimum:
 ```bash
 rtk proxy bash scripts/setup_discord_sdk.sh
 rtk proxy xcodebuild -project ProcessReporter.xcodeproj -scheme ProcessReporter -configuration Debug -destination 'generic/platform=macOS' build
-rtk proxy xcodebuild -project ProcessReporter.xcodeproj -scheme ProcessReporter -configuration Release -destination 'generic/platform=macOS' ARCHS='arm64 x86_64' ONLY_ACTIVE_ARCH=NO build
+rtk proxy xcodebuild -project ProcessReporter.xcodeproj -scheme ProcessReporter -configuration Release -destination 'generic/platform=macOS' ARCHS=arm64 ONLY_ACTIVE_ARCH=NO build
 rtk git diff --check
 rtk proxy plutil -lint ProcessReporter/Info.plist ExportOptions.plist
 ```
 
-Also run strict-concurrency and static-analysis checks when the release changes Swift runtime or data-flow code. Verify that Sparkle resolves to the reviewed version, the Discord dylib is universal, release notes are non-empty, and tag/project versions match.
+Also run strict-concurrency and static-analysis checks when the release changes Swift runtime or data-flow code. The workflow runs `scripts/prepare_arm64_app.sh` after export because Sparkle's macOS binary framework contains multiple architecture slices even when the app target builds for arm64. Verify that Sparkle resolves to the reviewed version, every shipped executable and the Discord dylib are arm64-only after that preparation step, release notes are non-empty, and tag/project versions match.
 
 ### 5. Commit, tag, and atomically push
 
@@ -108,7 +108,7 @@ rtk git tag -a vX.Y.Z -m "ProcessReporter vX.Y.Z"
 rtk git push --atomic origin main vX.Y.Z
 ```
 
-Do not create the GitHub Release manually. The tag-triggered workflow selects Developer ID or ad-hoc distribution from the available Apple secrets, creates a hidden draft, validates the universal application, generates an appcast whose DMG enclosure has a Sparkle EdDSA signature, publishes the release, and explicitly repairs GitHub's `latest` pointer. The Developer ID branch additionally validates the notarized application and DMG.
+Do not create the GitHub Release manually. The tag-triggered workflow selects Developer ID or ad-hoc distribution from the available Apple secrets, creates a hidden draft, validates the arm64-only application, generates an appcast whose DMG enclosure has a Sparkle EdDSA signature, publishes the release, and explicitly repairs GitHub's `latest` pointer. The Developer ID branch additionally validates the notarized application and DMG.
 
 ### 6. Monitor the real endpoint
 

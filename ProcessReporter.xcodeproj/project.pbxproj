@@ -336,7 +336,7 @@
 		1FD8C8CD2DA258F4009F6BCB /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ARCHS = "$(ARCHS_STANDARD)";
+				ARCHS = arm64;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = ProcessReporter/ProcessReporter.entitlements;
 				CODE_SIGN_STYLE = Automatic;
@@ -384,7 +384,7 @@
 		1FD8C8CE2DA258F4009F6BCB /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ARCHS = "$(ARCHS_STANDARD)";
+				ARCHS = arm64;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = ProcessReporter/ProcessReporter.entitlements;
 				CODE_SIGN_STYLE = Automatic;

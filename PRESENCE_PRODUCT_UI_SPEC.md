@@ -5,7 +5,7 @@
 | 文档状态 | Approved for implementation |
 | 版本 | 1.0 |
 | 日期 | 2026-07-15 |
-| 产品形态 | macOS 15+ 菜单栏应用 |
+| 产品形态 | Apple Silicon (`arm64`) 上的 macOS 15+ 菜单栏应用 |
 | 主要入口 | Menu Bar Popover |
 | 次要入口 | Settings Window |
 | 实现边界 | AppKit 管理应用生命周期、`NSStatusItem`、`NSPopover` 与 `NSWindow`；SwiftUI 承载新界面内容 |

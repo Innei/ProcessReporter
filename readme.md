@@ -44,6 +44,7 @@ S3-compatible storage is asset infrastructure, not a Presence destination. A hos
 
 ## Requirements
 
+- Apple Silicon Mac (`arm64`). Intel Macs are not supported.
 - macOS 15.0 or later.
 - Accessibility permission only when window titles are enabled.
 - The optional media helper when media playback synchronization is enabled.

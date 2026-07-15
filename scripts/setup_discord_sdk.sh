@@ -12,7 +12,7 @@ set -euo pipefail
 # Defaults to v3.2.1 if URL not provided:
 #   https://dl-game-sdk.discordapp.net/3.2.1/discord_game_sdk.zip
 #
-# Requirements: curl, unzip, find, awk
+# Requirements: curl, unzip, find, awk, lipo
 
 DEFAULT_URL="https://dl-game-sdk.discordapp.net/3.2.1/discord_game_sdk.zip"
 DEFAULT_SHA256="6757bb4a1f5b42aa7b6707cbf2158420278760ac5d80d40ca708bb01d20ae6b4"
@@ -79,40 +79,33 @@ else
   exit 1
 fi
 
-# Build one universal macOS dylib. The release archive is universal, so copying
-# only the runner's native slice would make the other architecture fail at
-# launch even when the application itself compiled successfully.
+# Install only the Apple Silicon dylib. ProcessReporter no longer supports
+# Intel Macs, so retaining an x86_64 slice would increase the release size and
+# weaken the arm64-only artifact invariant.
 ARM64_DYLIB="$(find "$EXTRACT_DIR" \( -path "*/aarch64/*.dylib" -o -path "*/arm64/*.dylib" \) | head -n1 || true)"
-X86_64_DYLIB="$(find "$EXTRACT_DIR" -path "*/x86_64/*.dylib" | head -n1 || true)"
 
-if [[ -z "$ARM64_DYLIB" || -z "$X86_64_DYLIB" ]]; then
-  echo "[setup] ERROR: Discord SDK archive does not contain both arm64 and x86_64 macOS dylibs." >&2
+if [[ -z "$ARM64_DYLIB" ]]; then
+  echo "[setup] ERROR: Discord SDK archive does not contain an arm64 macOS dylib." >&2
   exit 1
 fi
 if ! command -v lipo >/dev/null 2>&1; then
-  echo "[setup] ERROR: lipo is required to create the universal Discord SDK dylib." >&2
+  echo "[setup] ERROR: lipo is required to verify the Discord SDK dylib." >&2
   exit 1
 fi
 
 echo "[setup] Found arm64 dylib: $ARM64_DYLIB"
-echo "[setup] Found x86_64 dylib: $X86_64_DYLIB"
-lipo -create "$ARM64_DYLIB" "$X86_64_DYLIB" \
-  -output "$LIB_DIR/discord_game_sdk.dylib"
+cp -f "$ARM64_DYLIB" "$LIB_DIR/discord_game_sdk.dylib"
 
 echo "[setup] Verifying outputs ..."
 ls -l "$INCLUDE_DIR" || true
 ls -l "$LIB_DIR" || true
 
-# Verify both required architecture slices.
+# Reject any accidental Intel slice in the vendored release input.
 ARCHS="$(lipo -archs "$LIB_DIR/discord_game_sdk.dylib")"
 echo "[setup] dylib architectures: $ARCHS"
-case " $ARCHS " in
-  *" arm64 "*) ;;
-  *) echo "[setup] ERROR: universal dylib is missing arm64." >&2; exit 1 ;;
-esac
-case " $ARCHS " in
-  *" x86_64 "*) ;;
-  *) echo "[setup] ERROR: universal dylib is missing x86_64." >&2; exit 1 ;;
-esac
+if [[ "$ARCHS" != "arm64" ]]; then
+  echo "[setup] ERROR: Discord SDK dylib is not arm64-only: $ARCHS" >&2
+  exit 1
+fi
 
 echo "[setup] Done. You can now build the Xcode project."

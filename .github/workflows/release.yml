@@ -17,7 +17,7 @@ concurrency:
 jobs:
   release:
     name: Build and publish
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 60
     environment: release
 
@@ -130,10 +130,12 @@ jobs:
       - name: Show toolchain
         run: |
           set -euo pipefail
+          [[ "$(uname -m)" == "arm64" ]]
+          sw_vers
           xcodebuild -version
           swift --version
 
-      - name: Prepare universal Discord SDK
+      - name: Prepare arm64 Discord SDK
         run: bash scripts/setup_discord_sdk.sh
 
       - name: Select distribution mode
@@ -234,7 +236,7 @@ jobs:
           fi
           echo "identity=$SIGNING_IDENTITY" >> "$GITHUB_OUTPUT"
 
-      - name: Archive and export universal application
+      - name: Archive and export arm64 application
         env:
           DISTRIBUTION_MODE: ${{ steps.distribution.outputs.mode }}
           SIGNING_IDENTITY: ${{ steps.signing.outputs.identity }}
@@ -254,7 +256,7 @@ jobs:
               -destination 'generic/platform=macOS' \
               -archivePath "$ARCHIVE_PATH" \
               -clonedSourcePackagesDirPath "$SOURCE_PACKAGES_PATH" \
-              ARCHS='arm64 x86_64' \
+              ARCHS=arm64 \
               ONLY_ACTIVE_ARCH=NO \
               CODE_SIGN_STYLE=Manual \
               CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
@@ -276,7 +278,7 @@ jobs:
               -destination 'generic/platform=macOS' \
               -archivePath "$ARCHIVE_PATH" \
               -clonedSourcePackagesDirPath "$SOURCE_PACKAGES_PATH" \
-              ARCHS='arm64 x86_64' \
+              ARCHS=arm64 \
               ONLY_ACTIVE_ARCH=NO \
               CODE_SIGN_STYLE=Manual \
               CODE_SIGN_IDENTITY=- \
@@ -289,6 +291,12 @@ jobs:
               "$ARCHIVE_PATH/Products/Applications/ProcessReporter.app" \
               "$EXPORT_PATH/ProcessReporter.app"
           fi
+
+      - name: Remove Intel slices and re-sign application
+        env:
+          DISTRIBUTION_MODE: ${{ steps.distribution.outputs.mode }}
+          SIGNING_IDENTITY: ${{ steps.signing.outputs.identity }}
+        run: bash scripts/prepare_arm64_app.sh "$EXPORT_PATH/ProcessReporter.app"
 
       - name: Verify application signatures and architectures
         env:
@@ -311,12 +319,12 @@ jobs:
           INSTALLER_XPC="$SPARKLE_VERSION/XPCServices/Installer.xpc"
           INSTALLER_BINARY="$INSTALLER_XPC/Contents/MacOS/Installer"
 
-          verify_universal() {
+          verify_arm64_only() {
             local binary="$1"
             local architectures
             architectures="$(lipo -archs "$binary")"
-            [[ " $architectures " == *" arm64 "* && " $architectures " == *" x86_64 "* ]] || {
-              echo "Not universal: $binary ($architectures)" >&2
+            [[ "$architectures" == "arm64" ]] || {
+              echo "Not arm64-only: $binary ($architectures)" >&2
               exit 1
             }
           }
@@ -345,7 +353,7 @@ jobs:
             "$INSTALLER_BINARY"
           do
             test -f "$BINARY"
-            verify_universal "$BINARY"
+            verify_arm64_only "$BINARY"
           done
 
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
@@ -434,8 +442,7 @@ jobs:
             "$DMG_MOUNT/ProcessReporter.app"
           MOUNTED_ARCHITECTURES="$(lipo -archs \
             "$DMG_MOUNT/ProcessReporter.app/Contents/MacOS/ProcessReporter")"
-          [[ " $MOUNTED_ARCHITECTURES " == *" arm64 "* ]]
-          [[ " $MOUNTED_ARCHITECTURES " == *" x86_64 "* ]]
+          [[ "$MOUNTED_ARCHITECTURES" == "arm64" ]]
           hdiutil detach "$DMG_MOUNT"
           trap - EXIT
 

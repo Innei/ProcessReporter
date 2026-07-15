@@ -16,7 +16,7 @@ open ProcessReporter.xcodeproj
 # Build from command line (if needed)
 xcodebuild -project ProcessReporter.xcodeproj -scheme ProcessReporter -configuration Debug build
 
-# The app requires Xcode 15+ and macOS 15+ to build and run
+# The app requires an Apple Silicon Mac, Xcode 16.2+, and macOS 15+ to build and run
 ```
 
 ### Development Setup

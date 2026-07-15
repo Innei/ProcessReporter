@@ -46,7 +46,7 @@ ProcessReporter/Core/Reporter/
 
 ### API Constraints
 
-- **Platform**: macOS x86_64 and Apple Silicon (universal binary support)
+- **Platform**: Apple Silicon (`arm64`) only; Intel Macs are unsupported
 - **SDK**: Discord Game SDK 3.2.1+ (C++ library)
 - **Communication**: Official Discord IPC handled by SDK
 - **Authentication**: Discord Application ID only (no complex OAuth)
@@ -666,11 +666,10 @@ Add Discord status to status item menu following existing pattern in `StatusItem
    ```
    ProcessReporter/Frameworks/DiscordSDK/
    ├── discord.h                    # C++ header
-   ├── discord_game_sdk.dylib       # macOS x86_64 library
-   └── discord_game_sdk_arm64.dylib # macOS ARM64 library (universal binary)
+   └── discord_game_sdk.dylib       # macOS arm64 library
    ```
 3. Link dynamic library in Build Phases → Link Binary With Libraries
-4. Set up library search paths and ensure both architectures are supported
+4. Set up library search paths and verify the dylib contains only arm64
 
 ### Step 3: Create SDK Bridge
 1. Create `DiscordSDKBridge.h` (Objective-C header)
@@ -706,7 +705,7 @@ Add Discord status to status item menu following existing pattern in `StatusItem
 
 ### Step 8: Testing and Validation
 1. Test with Discord client running and stopped
-2. Test both x86_64 and Apple Silicon architectures
+2. Test the Apple Silicon arm64 build and reject accidental Intel slices
 3. Verify rich presence appears correctly in Discord profile
 4. Test all configuration options and edge cases
 5. Performance testing with frequent updates
@@ -716,8 +715,7 @@ Add Discord status to status item menu following existing pattern in `StatusItem
 ```
 ProcessReporter/Frameworks/DiscordSDK/
 ├── discord.h                           # Discord Game SDK C++ header
-├── discord_game_sdk.dylib              # macOS x86_64 library
-└── discord_game_sdk_arm64.dylib        # macOS Apple Silicon library
+└── discord_game_sdk.dylib              # macOS arm64 library
 
 ProcessReporter/Core/Discord/
 ├── DiscordSDKBridge.h                  # Objective-C header
@@ -735,10 +733,10 @@ ProcessReporter/Preferences/
 
 ### Required Dependencies
 - ✅ **Official Discord Game SDK** (C++ library with official support)
-- ✅ Universal binary support (x86_64 + Apple Silicon)
+- ✅ Apple Silicon arm64 support with Intel slices excluded
 - ✅ Objective-C++/Swift bridge (mature, stable interop)
 - ✅ Existing ProcessReporter frameworks (RxSwift, SnapKit for UI)
-- ✅ macOS 11.0+ (Discord SDK requirement)
+- ✅ macOS 15.0+ on Apple Silicon
 - ✅ Swift 5.0+ (already supported by ProcessReporter)
 - ✅ Direct S3 icon integration via existing `DataStore.shared.iconURL()` API
 - ✅ Full Discord Rich Presence feature support (including buttons)

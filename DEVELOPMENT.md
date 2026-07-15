@@ -4,6 +4,7 @@ ProcessReporter is a macOS menu-bar Presence synchronization application. Its ce
 
 ## Requirements
 
+- Apple Silicon Mac (`arm64`); Intel build and release targets are intentionally unsupported.
 - macOS 15.0 or later.
 - Xcode 16.2 or later.
 - Swift Package Manager dependencies resolved by Xcode.
@@ -168,6 +169,8 @@ Use a new identifier for every migration fixture when `cfprefsd` caching could i
 ## Release
 
 Production publication requires signing, notarization, a valid Sparkle feed, and an EdDSA public key. Use the repository release procedure rather than ad hoc archive commands. A build without valid Sparkle metadata intentionally disables update checks.
+
+The release workflow runs `scripts/prepare_arm64_app.sh` after export. This removes Intel slices from precompiled dependencies such as Sparkle and re-signs nested code from the inside out before notarization or DMG creation. A plain Xcode arm64 build is not sufficient evidence that every embedded binary is arm64-only.
 
 ## Documentation
 

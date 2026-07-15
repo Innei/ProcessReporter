@@ -13,6 +13,11 @@ ProcessReporter is a personal macOS Presence synchronization utility. It shares 
 
 S3 is not a Presence destination. It is used on demand only when a destination can benefit from a public application icon URL.
 
+## System Requirements
+
+- Apple Silicon Mac (`arm64`). Intel Macs are not supported.
+- macOS 15.0 or later.
+
 ## First Launch
 
 The onboarding flow has five stages:
