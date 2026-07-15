@@ -6,471 +6,248 @@
 //
 
 import Cocoa
-import RxCocoa
-import RxSwift
-import SnapKit
+import Combine
 import SwiftUI
 
-private final class InvalidatingTimer: @unchecked Sendable {
-	var value: Timer?
-
-	deinit {
-		value?.invalidate()
-	}
-}
-
 @MainActor
-class ReporterStatusItemManager: NSObject {
-	private var statusItem: NSStatusItem!
+final class ReporterStatusItemManager: NSObject {
+    enum StatusItemIconStatus {
+        case ready
+        case syncing
+        case offline
+        case paused
+        case partialError
+        case error
+    }
 
-	// MARK: - Items
+    private let statusItem: NSStatusItem
+    private let model = PresenceMenuBarModel()
+    private let popover = NSPopover()
+    private let contextMenu = NSMenu()
 
-	private var enabledItem: NSMenuItem!
+    private var hostingController: NSHostingController<PresencePopoverView>!
+    private var aggregateStatusObservation: AnyCancellable?
+    private var renderedStatus: PresenceAggregateStatus?
 
-	private var currentProcessItem: NSMenuItem!
-	private var currentMediaNameItem: NSMenuItem!
+    override init() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        super.init()
 
-	private var lastSendProcessNameItem: NSMenuItem!
-	private var lastSendProcessTimeItem: NSMenuItem!
-	private var lastSendMediaNameItem: NSMenuItem!
+        configureStatusItem()
+        configurePopover()
+        configureContextMenu()
+        observeAggregateStatus()
+        applyStatusItemAppearance(model.aggregateStatus)
+    }
 
-	private var lastReportTime: Date?
-	private let updateTimer = InvalidatingTimer()
-	private var mediaRefreshTask: Task<Void, Never>?
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
 
-	// Action
-	private var enableMediaReportButton: NSMenuItem!
-	private var enableProcessReportButton: NSMenuItem!
+    func beginDelivery(to destinationIDs: [PresenceDestinationID]) -> UUID {
+        model.beginDelivery(to: destinationIDs)
+    }
 
-	#if DEBUG
-		private var debugItem: NSMenuItem!
-	#endif
+    func completeDelivery(
+        deliveryID: UUID,
+        results: [PresenceDestinationDeliveryResult],
+        assetResolution: PresenceAssetResolution,
+        persistenceError: String? = nil
+    ) {
+        model.completeDelivery(
+            deliveryID: deliveryID,
+            results: results,
+            assetResolution: assetResolution,
+            persistenceError: persistenceError
+        )
+    }
 
-	override init() {
-		super.init()
-		statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    func publishCurrentPresence(_ report: ReportModel) {
+        model.publishCurrentPresence(report)
+    }
 
-		setupStatusItem()
-		synchronizeUI()
-	}
+    func clearCurrentPresence() {
+        model.clearCurrentPresence()
+    }
 
-	@available(*, unavailable)
-	required init?(coder: NSCoder) {
-		fatalError("init(coder:) has not been implemented")
-	}
+    func toggleStatusItemIcon(_ status: StatusItemIconStatus) {
+        switch status {
+        case .ready:
+            model.setRuntimeStatus(.ready)
+        case .syncing:
+            model.setRuntimeStatus(.syncing)
+        case .offline:
+            model.setRuntimeStatus(.waitingForNetwork)
+        case .paused:
+            model.setRuntimeStatus(.paused)
+        case .partialError, .error:
+            // Delivery completion is the source of truth for degraded and error
+            // aggregation. Reporter retains these calls during the compatibility
+            // phase, but they must not overwrite destination-aware state.
+            break
+        }
+    }
 
-	deinit {
-		mediaRefreshTask?.cancel()
-	}
+    private func configureStatusItem() {
+        guard let button = statusItem.button else { return }
+        button.target = self
+        button.action = #selector(statusItemPressed(_:))
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        button.imagePosition = .imageOnly
+        button.imageScaling = .scaleProportionallyDown
+        button.setAccessibilityRole(.button)
+    }
 
-	private func synchronizeUI() {
-		let preferences = PreferencesDataModel.shared
-		enabledItem.state = preferences.reportingAllowed ? .on : .off
-		enableMediaReportButton.state =
-			preferences.enabledTypes.value.types.contains(.media) ? .on : .off
-		enableProcessReportButton.state =
-			preferences.enabledTypes.value.types.contains(.process) ? .on : .off
-	}
+    private func configurePopover() {
+        let actions = PresencePopoverActions(
+            openSettings: { [weak self] in
+                self?.openSettings()
+            },
+            openPrivacyRules: { [weak self] applicationIdentifier in
+                self?.openSettings(
+                    route: .privacyRules(applicationIdentifier: applicationIdentifier)
+                )
+            },
+            openDestinations: { [weak self] in
+                self?.openSettings(route: .section(.destinations))
+            },
+            openDestination: { [weak self] destinationID in
+                self?.openSettings(route: .destination(destinationID.settingsDestination))
+            },
+            openIconHosting: { [weak self] in
+                self?.openSettings(route: .destination(.applicationIconHosting))
+            },
+            dismiss: { [weak self] in
+                self?.popover.performClose(nil)
+            },
+            quit: { [weak self] in
+                self?.popover.performClose(nil)
+                NSApp.terminate(nil)
+            }
+        )
+        let rootView = PresencePopoverView(model: model, actions: actions)
+        hostingController = NSHostingController(rootView: rootView)
+        hostingController.sizingOptions = [.preferredContentSize]
 
-	private func setupStatusItem() {
-		toggleStatusItemIcon(.ready)
+        popover.behavior = .transient
+        popover.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        popover.delegate = self
+        popover.contentSize = NSSize(width: 372, height: 420)
+        popover.contentViewController = hostingController
+    }
 
-		let menu = NSMenu()
-		currentProcessItem = NSMenuItem(
-			title: "No Process", action: #selector(noop), keyEquivalent: "", target: self)
-		menu.addItem(NSMenuItem.sectionHeader(title: "Current Process"))
-		menu.addItem(currentProcessItem)
+    private func configureContextMenu() {
+        let settingsItem = NSMenuItem(
+            title: "Settings…",
+            action: #selector(showSettingsFromMenu(_:)),
+            keyEquivalent: ","
+        )
+        settingsItem.target = self
+        contextMenu.addItem(settingsItem)
 
-		menu.addItem(NSMenuItem.separator())
-		menu.addItem(NSMenuItem.sectionHeader(title: "Current Media"))
-		currentMediaNameItem = NSMenuItem(
-			title: "No Media", action: #selector(noop), keyEquivalent: "", target: self)
-		menu.addItem(currentMediaNameItem)
+        let updateItem = NSMenuItem(
+            title: "Check for Updates…",
+            action: #selector(checkForUpdates(_:)),
+            keyEquivalent: ""
+        )
+        updateItem.target = self
+        contextMenu.addItem(updateItem)
 
-		menu.addItem(NSMenuItem.separator())
+        contextMenu.addItem(.separator())
 
-		menu.addItem(
-			NSMenuItem.sectionHeader(title: "Last Send"))
+        let quitItem = NSMenuItem(
+            title: "Quit ProcessReporter",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        )
+        quitItem.target = NSApp
+        contextMenu.addItem(quitItem)
+    }
 
-		lastSendProcessNameItem = NSMenuItem(
-			title: "..Last Process", action: #selector(noop), keyEquivalent: "", target: self)
-		menu.addItem(lastSendProcessNameItem)
-		lastSendMediaNameItem = NSMenuItem(
-			title: "..Last Media", action: #selector(noop), keyEquivalent: "", target: self)
-		menu.addItem(lastSendMediaNameItem)
-		lastSendProcessTimeItem = NSMenuItem(
-			title: "..Last Time", action: #selector(noop), keyEquivalent: "", target: self)
-		menu.addItem(lastSendProcessTimeItem)
+    private func observeAggregateStatus() {
+        aggregateStatusObservation = model.$aggregateStatus
+            .removeDuplicates()
+            .sink { [weak self] status in
+                Task { @MainActor [weak self] in
+                    self?.applyStatusItemAppearance(status)
+                }
+            }
+    }
 
-		menu.addItem(NSMenuItem.separator())
+    private func applyStatusItemAppearance(_ status: PresenceAggregateStatus) {
+        guard renderedStatus != status, let button = statusItem.button else { return }
+        renderedStatus = status
 
-		enabledItem = NSMenuItem(
-			title: "Enabled", action: #selector(toggleEnabled), keyEquivalent: "s", target: self)
-		menu.addItem(enabledItem)
-		menu.addItem(
-			NSMenuItem(
-				title: "Settings", action: #selector(showSettings), keyEquivalent: ",", target: self))
-		menu.addItem(
-			NSMenuItem(
-				title: "Check for Updates…", action: #selector(checkForUpdates),
-				keyEquivalent: "", target: self))
+        button.image = MenuBarIconRenderer.image(for: status)
+        button.setAccessibilityLabel(
+            "ProcessReporter, \(status.accessibilityDescription)"
+        )
+        button.setAccessibilityValue(status.displayText)
+        button.setAccessibilityHelp("Open Presence status")
+        button.toolTip = "ProcessReporter — \(status.displayText)"
+    }
 
-		menu.addItem(NSMenuItem.separator())
+    @objc private func statusItemPressed(_ sender: NSStatusBarButton) {
+        guard let event = NSApp.currentEvent else {
+            togglePopover(relativeTo: sender)
+            return
+        }
 
-		menu.addItem(NSMenuItem.sectionHeader(title: "Enabled Reporters"))
-		enableMediaReportButton = NSMenuItem(
-			title: "Media", action: #selector(toggleEnableMedia), keyEquivalent: "", target: self)
-		enableProcessReportButton = NSMenuItem(
-			title: "Process", action: #selector(toggleEnableProcess), keyEquivalent: "",
-			target: self)
-		menu.addItem(enableMediaReportButton)
-		menu.addItem(enableProcessReportButton)
+        if event.type == .rightMouseUp
+            || (event.type == .leftMouseUp && event.modifierFlags.contains(.control))
+        {
+            popover.performClose(nil)
+            NSMenu.popUpContextMenu(contextMenu, with: event, for: sender)
+            return
+        }
 
-		menu.addItem(NSMenuItem.separator())
+        togglePopover(relativeTo: sender)
+    }
 
-		#if DEBUG
-			debugItem = NSMenuItem(
-				title: "Debug UI", action: nil, keyEquivalent: "", target: self)
+    private func togglePopover(relativeTo button: NSStatusBarButton) {
+        if popover.isShown {
+            popover.performClose(nil)
+            return
+        }
 
-			debugItem.view = DebugUICell()
+        model.refreshConfiguration()
+        popover.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover.contentViewController?.view.window?.makeKey()
+    }
 
-			menu.addItem(debugItem)
-			debugItem.view!.snp.makeConstraints { make in
-				make.width.equalToSuperview()
-				make.height.equalTo(22)
-			}
+    private func openSettings(route: SettingsRoute? = nil) {
+        popover.performClose(nil)
+        DispatchQueue.main.async {
+            SettingWindowManager.shared.showWindow(route: route)
+        }
+    }
 
-		#endif
-		menu.addItem(
-			NSMenuItem(title: "Quit", action: #selector(NSApp.terminate), keyEquivalent: "q"))
+    @objc private func showSettingsFromMenu(_ sender: Any?) {
+        openSettings()
+    }
 
-		menu.delegate = self
-		statusItem.menu = menu
-
-		setupUpdateTimer()
-	}
-
-	private func setupUpdateTimer() {
-		updateTimer.value = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-			Task { @MainActor in
-				self?.updateLastSendTimeDisplay()
-			}
-		}
-		if let timer = updateTimer.value {
-			RunLoop.main.add(timer, forMode: .common)
-		}
-	}
-
-	private func updateLastSendTimeDisplay() {
-		guard let lastTime = lastReportTime else { return }
-		lastSendProcessTimeItem.title = lastTime.relativeTimeDescription()
-	}
-
-	enum StatusItemIconStatus {
-		case ready
-		case syncing
-		case offline
-		case paused
-		case partialError
-		case error
-	}
-
-	func toggleStatusItemIcon(_ status: StatusItemIconStatus) {
-		guard let button = statusItem?.button else { return }
-		switch status {
-		case .ready:
-			button.image = NSImage(
-				systemSymbolName: "icloud.fill", accessibilityDescription: "Ready")
-		case .offline:
-			button.image = NSImage(
-				systemSymbolName: "icloud.slash.fill", accessibilityDescription: "Network Error")
-		case .paused:
-			button.image = NSImage(
-				systemSymbolName: "icloud.slash.fill", accessibilityDescription: "Paused")
-		case .syncing:
-			button.image = NSImage(
-				systemSymbolName: "arrow.trianglehead.2.clockwise.rotate.90.icloud.fill",
-				accessibilityDescription: "Syncing")
-		case .partialError:
-			button.image = NSImage(
-				systemSymbolName: "exclamationmark.icloud",
-				accessibilityDescription: "Partial Error")
-		case .error:
-			button.image = NSImage(
-				systemSymbolName: "exclamationmark.icloud.fill", accessibilityDescription: "Error")
-		}
-	}
-
-	func updateCurrentProcessItem(_ info: FocusedWindowInfo) {
-		currentProcessItem.title = info.appName
-		currentProcessItem.image = {
-			let icon = info.icon
-			icon?.size = NSSize(width: 16, height: 16)
-			return icon
-		}()
-	}
-
-	func updateCurrentMediaItem(
-		_ mediaInfo: MediaInfo? = nil
-	) {
-		// Reset rich presentation first. NSMenuItem keeps attributedTitle and
-		// image independently from title, so assigning title alone leaves stale
-		// artwork and text visible.
-		currentMediaNameItem.attributedTitle = nil
-		currentMediaNameItem.image = nil
-
-		if let mediaInfo = mediaInfo, let name = mediaInfo.name {
-			let statusPrefix = mediaInfo.playing ? "" : "⏸ "
-			currentMediaNameItem.title = statusPrefix + formatMediaName(name, mediaInfo.artist)
-			if let base64 = mediaInfo.image, let data = Data(base64Encoded: base64) {
-				let firstLine = statusPrefix + name + "\n"
-				let secondLine = mediaInfo.artist ?? "-"
-				let fullString = firstLine + secondLine
-
-				let attributedString = NSMutableAttributedString(string: fullString)
-
-				// First line: Bold font
-				let firstLineLength = (firstLine as NSString).length
-				let firstLineRange = NSRange(location: 0, length: firstLineLength)
-				attributedString.addAttribute(
-					.font, value: NSFont.systemFont(ofSize: 16, weight: .medium), range: firstLineRange)
-
-				// Second line: Secondary color
-				let secondLineRange = NSRange(
-					location: firstLineLength,
-					length: (secondLine as NSString).length
-				)
-				attributedString.addAttribute(
-					.foregroundColor, value: NSColor.secondaryLabelColor, range: secondLineRange)
-
-				currentMediaNameItem.attributedTitle = attributedString
-				currentMediaNameItem.image = NSImage(data: data, size: .init(width: 40, height: 40))?
-					.withRoundedCorners(radius: 8)
-			}
-
-		} else {
-			currentMediaNameItem.title = "..No Media"
-		}
-	}
-
-	func updateLastSendProcessNameItem(_ info: ReportModel) {
-		lastSendProcessNameItem.title = info.processName ?? "N/A"
-		lastReportTime = info.timeStamp
-		updateLastSendTimeDisplay()
-
-		lastSendMediaNameItem.title = formatMediaName(info.mediaName, info.artist)
-	}
-
-	func formatMediaName(_ mediaName: String?, _ artist: String?) -> String {
-		guard let mediaName else { return "No Media" }
-		if let artist {
-			return "\(mediaName) - \(artist)"
-		}
-		return mediaName
-	}
+    @objc private func checkForUpdates(_ sender: Any?) {
+        (NSApp.delegate as? AppDelegate)?.checkForUpdates(sender)
+    }
 }
 
-// MARK: - Menu Delegate
-
-extension ReporterStatusItemManager: NSMenuDelegate {
-	func menuWillOpen(_ menu: NSMenu) {
-		synchronizeUI()
-		#if DEBUG
-			if debugItem.view == nil {
-				debugItem.view = DebugUICell()
-			}
-		#endif
-		let preferences = PreferencesDataModel.shared
-		if preferences.reportingAllowed,
-			preferences.enabledTypes.value.types.contains(.process),
-			let info = ApplicationMonitor.shared.getFocusedWindowInfo()
-		{
-			updateCurrentProcessItem(info)
-		} else {
-			currentProcessItem.title = "No Process"
-			currentProcessItem.image = nil
-		}
-
-		// Render the cached value immediately, then refresh without blocking the
-		// main run loop. The previous semaphore path raced on a captured variable
-		// and could freeze menu tracking for every open.
-		updateCurrentMediaItem(MediaInfoManager.getMediaInfo())
-		mediaRefreshTask?.cancel()
-		guard preferences.reportingAllowed,
-			preferences.enabledTypes.value.types.contains(.media)
-		else {
-			mediaRefreshTask = nil
-			return
-		}
-		mediaRefreshTask = Task { @MainActor [weak self] in
-			let refreshedInfo = try? await MediaInfoManager.getMediaInfoAsync(timeout: 3.0)
-			guard let self, !Task.isCancelled else { return }
-			self.updateCurrentMediaItem(refreshedInfo ?? MediaInfoManager.getMediaInfo())
-			self.mediaRefreshTask = nil
-		}
-	}
+extension ReporterStatusItemManager: NSPopoverDelegate {
+    func popoverDidClose(_ notification: Notification) {
+        statusItem.button?.highlight(false)
+    }
 }
 
-// MARK: - Menu Actions
-
-extension ReporterStatusItemManager {
-	@objc private func noop() {}
-
-	@objc private func toggleEnabled() {
-		let isEnabled = PreferencesDataModel.shared.isEnabled.value
-		guard PreferencesDataModel.shared.setReportingEnabled(!isEnabled) else {
-			enabledItem.state = .off
-			ToastManager.shared.warning(
-				"Reporting remains paused until the credential store is recovered"
-			)
-			showSettings()
-			return
-		}
-	}
-
-	@objc private func showSettings() {
-		SettingWindowManager.shared.showWindow()
-	}
-
-	@objc private func checkForUpdates(_ sender: Any?) {
-		(NSApp.delegate as? AppDelegate)?.checkForUpdates(sender)
-	}
-
-	@objc private func toggleEnableMedia(sender: NSMenuItem) {
-		let currentState = sender.state
-
-		var snapshot = PreferencesDataModel.shared.enabledTypes.value.types
-		if currentState == .on {
-			snapshot.remove(.media)
-		} else {
-			snapshot.insert(.media)
-		}
-		PreferencesDataModel.shared.enabledTypes.accept(.init(types: snapshot))
-	}
-
-	@objc private func toggleEnableProcess(sender: NSMenuItem) {
-		let currentState = sender.state
-
-		var snapshot = PreferencesDataModel.shared.enabledTypes.value.types
-		if currentState == .on {
-			snapshot.remove(.process)
-		} else {
-			snapshot.insert(.process)
-		}
-		PreferencesDataModel.shared.enabledTypes.accept(.init(types: snapshot))
-	}
+private extension PresenceDestinationID {
+    var settingsDestination: SettingsDestination {
+        switch self {
+        case .mixSpace:
+            return .mixSpace
+        case .slack:
+            return .slack
+        case .discord:
+            return .discord
+        }
+    }
 }
-
-#if DEBUG
-	class DebugUICell: NSStackView {
-		var backgroundView: NSVisualEffectView!
-		var trackingArea: NSTrackingArea?
-
-		var debugLabel: NSTextField!
-		var debugIcon: NSImageView!
-
-		convenience init() {
-			self.init(frame: .zero)
-
-			let stackView = self
-			stackView.orientation = .horizontal
-			stackView.spacing = 8
-
-			// 使用系统菜单项选中样式
-			backgroundView = NSVisualEffectView()
-			// 菜单项高亮使用 .selection 材质
-			backgroundView.material = .selection
-			backgroundView.state = .active
-			backgroundView.wantsLayer = true
-			backgroundView.layer?.cornerRadius = 4
-			backgroundView.alphaValue = 0
-
-			// 一个小技巧：设置为强调模式以获取更蓝的外观
-			backgroundView.isEmphasized = true
-
-			// 移除任何可能影响颜色的背景
-			backgroundView.layer?.backgroundColor = nil
-
-			stackView.addSubview(backgroundView)
-			backgroundView.snp.makeConstraints { make in
-				make.horizontalEdges.equalToSuperview().inset(5)
-				make.verticalEdges.equalToSuperview()
-			}
-
-			debugIcon = NSImageView(
-				image: NSImage(systemSymbolName: "snowflake", accessibilityDescription: "Debug UI")!
-			)
-			debugIcon.frame.size = NSSize(width: 16, height: 16)
-			stackView.addArrangedSubview(debugIcon)
-			debugIcon.snp.makeConstraints { make in
-				make.left.equalTo(24)
-			}
-
-			debugLabel = NSTextField(labelWithString: "Debug UI")
-			debugLabel.isEditable = false
-			debugLabel.isBezeled = false
-			debugLabel.drawsBackground = false
-			stackView.addArrangedSubview(debugLabel)
-
-			stackView.gestureRecognizers = [
-				NSClickGestureRecognizer(target: self, action: #selector(debugUI))
-			]
-
-			// 确保视图被布局后更新 tracking areas
-			DispatchQueue.main.async {
-				self.updateTrackingAreas()
-			}
-		}
-
-		override func viewDidMoveToWindow() {
-			super.viewDidMoveToWindow()
-			// 当视图添加到窗口时更新 tracking areas
-			updateTrackingAreas()
-		}
-
-		override func viewDidMoveToSuperview() {
-			super.viewDidMoveToSuperview()
-			// 当视图添加到父视图时更新 tracking areas
-			updateTrackingAreas()
-		}
-
-		override func updateTrackingAreas() {
-			super.updateTrackingAreas()
-
-			// 移除旧的 tracking area
-			if let trackingArea = trackingArea {
-				removeTrackingArea(trackingArea)
-			}
-
-			// 创建并添加新的 tracking area
-			let newTrackingArea = NSTrackingArea(
-				rect: bounds,
-				options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-				owner: self,
-				userInfo: nil)
-			addTrackingArea(newTrackingArea)
-			trackingArea = newTrackingArea
-		}
-
-		@objc private func debugUI() {
-			let timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
-				sleep(50)
-			}
-			RunLoop.main.add(timer, forMode: .common)
-		}
-
-		override func mouseEntered(with event: NSEvent) {
-			backgroundView.alphaValue = 1
-			// 修改文本和图标为白色以匹配选中状态
-			debugLabel.textColor = .white
-			debugIcon.contentTintColor = .white
-		}
-
-		override func mouseExited(with event: NSEvent) {
-			backgroundView.alphaValue = 0
-			// 恢复文本和图标为默认颜色
-			debugLabel.textColor = .labelColor
-			debugIcon.contentTintColor = nil
-		}
-	}
-#endif

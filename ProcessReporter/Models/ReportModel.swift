@@ -38,6 +38,10 @@ class ReportModel {
     var mediaInfoRaw: MediaInfo? = nil
     @Transient
     var processInfoRaw: FocusedWindowInfo? = nil
+    @Transient
+    var sourceProcessApplicationIdentifier: String? = nil
+    @Transient
+    var sourceMediaApplicationIdentifier: String? = nil
 
     // Store integrations as Data for better performance
     @Attribute
@@ -46,15 +50,37 @@ class ReportModel {
     // External interface for integrations
     var integrations: [String] {
         get {
-            guard let data = integrationsData else { return [] }
-            return (try? JSONDecoder().decode([String].self, from: data)) ?? []
+            switch decodedSyncPayload {
+            case .modern(let payload):
+                return payload.deliveryResults
+                    .filter { $0.status == .succeeded }
+                    .map(\.displayName)
+            case .legacy(let integrations):
+                return integrations
+            case .unreadable:
+                return []
+            }
         }
         set {
             integrationsData = try? JSONEncoder().encode(newValue)
         }
     }
 
+    var decodedSyncPayload: DecodedSyncPayload {
+        SyncEventPayloadCodec.decode(integrationsData)
+    }
+
+    var storedSyncEventPayload: StoredSyncEventPayload? {
+        guard case .modern(let payload) = decodedSyncPayload else { return nil }
+        return payload
+    }
+
+    func setStoredSyncEventPayload(_ payload: StoredSyncEventPayload) throws {
+        integrationsData = try SyncEventPayloadCodec.encode(payload)
+    }
+
     func setMediaInfo(_ mediaInfo: MediaInfo) {
+        sourceMediaApplicationIdentifier = mediaInfo.applicationIdentifier
         artist = mediaInfo.artist
         mediaName = mediaInfo.name
         mediaProcessName = mediaInfo.processName
@@ -71,6 +97,7 @@ class ReportModel {
     }
 
     func setProcessInfo(_ processInfo: FocusedWindowInfo) {
+        sourceProcessApplicationIdentifier = processInfo.applicationIdentifier
         processName = processInfo.appName
         windowTitle = processInfo.title
         processInfoRaw = processInfo

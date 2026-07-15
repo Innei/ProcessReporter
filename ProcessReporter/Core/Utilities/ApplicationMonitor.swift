@@ -36,7 +36,10 @@ final class ApplicationMonitor {
     AXIsProcessTrusted()
   }
 
-  private func requestAccessibilityPermissionIfNeeded() -> Bool {
+  /// Requests Accessibility only from an explicit user action, such as the
+  /// onboarding permission button. Starting background monitoring must never
+  /// call this method implicitly.
+  func requestAccessibilityPermission() -> Bool {
     guard !isAccessibilityEnabled() else { return true }
 
     if !didRequestAccessibilityPermission {
@@ -139,7 +142,7 @@ final class ApplicationMonitor {
     // There is no reason to install a privacy-sensitive global event tap
     // when the application has not registered a consumer.
     guard onMouseClicked != nil else { return }
-    guard requestAccessibilityPermissionIfNeeded() else { return }
+    guard isAccessibilityEnabled() else { return }
     let generation = mouseMonitoringGeneration
 
     mouseEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [
@@ -184,7 +187,7 @@ final class ApplicationMonitor {
       }
     }
 
-    if requestAccessibilityPermissionIfNeeded() {
+    if isAccessibilityEnabled() {
       attachAccessibilityObserverToFrontmostApplication()
     }
   }

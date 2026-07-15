@@ -1,647 +1,198 @@
 # ProcessReporter Architecture
 
-## Table of Contents
-1. [System Architecture Overview](#system-architecture-overview)
-2. [Component Architecture](#component-architecture)
-3. [Data Flow](#data-flow)
-4. [Design Patterns](#design-patterns)
-5. [Threading and Concurrency Model](#threading-and-concurrency-model)
-6. [Performance Considerations](#performance-considerations)
-7. [Security Architecture](#security-architecture)
-8. [Technology Choices and Rationale](#technology-choices-and-rationale)
+## Scope and Invariants
 
-## System Architecture Overview
+ProcessReporter is a macOS menu bar Presence synchronization application. The architecture enforces four product invariants:
 
-ProcessReporter is a macOS application built with a modular, event-driven architecture that monitors user activity and reports it to various external services. The application runs as a menu bar utility and leverages macOS system APIs for window tracking and media playback monitoring.
+1. Only a sanitized current Presence may reach UI preview, destinations, or history.
+2. MixSpace, Slack, and Discord are destinations; S3 is optional asset infrastructure.
+3. A stale delivery generation must not persist after privacy, source, destination, pause, or sleep changes.
+4. Local history is a bounded delivery audit, not a productivity-analysis dataset.
 
-### High-Level Architecture Diagram
+## Runtime Architecture
 
 ```mermaid
-graph TB
-    subgraph "User Interface Layer"
-        MenuBar[Menu Bar UI]
-        PrefsWindow[Preferences Window]
-        Toast[Toast Notifications]
-    end
+flowchart LR
+  subgraph Capture
+    APP["ApplicationMonitor"]
+    MEDIA["MediaInfoManager"]
+  end
 
-    subgraph "Core Layer"
-        Reporter[Reporter Engine]
-        AppMonitor[Application Monitor]
-        MediaManager[Media Info Manager]
-        Database[(SQLite Database)]
-    end
+  subgraph Policy
+    SOURCES["General Sources"]
+    RULES["Privacy Evaluator"]
+    MAP["Legacy Mappings"]
+    ALIAS["Explicit Alias"]
+  end
 
-    subgraph "Extension Layer"
-        MixSpace[MixSpace Extension]
-        S3[S3 Extension]
-        Slack[Slack Extension]
-    end
+  subgraph Delivery
+    REPORTER["Reporter"]
+    MIX["MixSpace"]
+    SLACK["Slack"]
+    DISCORD["Discord"]
+    ASSET["S3 Asset Hosting"]
+  end
 
-    subgraph "System APIs"
-        Accessibility[Accessibility API]
-        MediaRemote[MediaRemote Framework]
-        NSWorkspace[NSWorkspace]
-    end
+  subgraph Presentation
+    MENU["Menu Bar Popover"]
+    SETTINGS["SwiftUI Settings"]
+    HISTORY["Sync History"]
+  end
 
-    subgraph "External Services"
-        MixSpaceAPI[MixSpace API]
-        S3API[AWS S3]
-        SlackAPI[Slack API]
-    end
-
-    MenuBar --> Reporter
-    PrefsWindow --> Database
-    
-    Reporter --> AppMonitor
-    Reporter --> MediaManager
-    Reporter --> Database
-    Reporter --> MixSpace
-    Reporter --> S3
-    Reporter --> Slack
-
-    AppMonitor --> Accessibility
-    AppMonitor --> NSWorkspace
-    MediaManager --> MediaRemote
-    
-    MixSpace --> MixSpaceAPI
-    S3 --> S3API
-    Slack --> SlackAPI
+  APP --> SOURCES
+  MEDIA --> SOURCES
+  SOURCES --> RULES --> MAP --> ALIAS --> REPORTER
+  REPORTER --> MENU
+  REPORTER --> MIX
+  REPORTER --> SLACK
+  REPORTER --> DISCORD
+  REPORTER -. "icon URL when supported" .-> ASSET
+  REPORTER --> HISTORY
+  SETTINGS --> SOURCES
+  SETTINGS --> RULES
 ```
 
-## Component Architecture
+## User Interface Ownership
 
-### 1. Reporter System (`Core/Reporter/`)
+| Module | Responsibility |
+| --- | --- |
+| `Features/MenuBar` | Daily Presence status, current sanitized preview, destination results, asset result |
+| `Features/Onboarding` | First-run source, destination, optional icon-hosting, and review workflow |
+| `Features/Settings/General` | Sharing state, sources, capabilities, startup |
+| `Features/Settings/Destinations` | MixSpace, Slack, Discord, and Application Icon Hosting configuration |
+| `Features/Settings/PrivacyRules` | Global defaults and application-centered rules |
+| `Features/Settings/History` | Native Sync Event list, filters, and Inspector |
+| `Features/Settings/Advanced` | Engine controls, compatibility, storage, backup, diagnostics, and destructive maintenance |
 
-The Reporter is the central engine that orchestrates all monitoring and reporting activities.
+The Settings shell is SwiftUI hosted by `SettingWindow`. Destination configuration uses native SwiftUI drafts with explicit test, save, credential intent, and dirty-navigation protection. Only the raw Legacy Mapping editor and cached-icon table remain AppKit compatibility surfaces; legacy Filter, History, and integration forms are not runtime routes.
+
+## Capture and Privacy Pipeline
 
 ```mermaid
-classDiagram
-    class Reporter {
-        -mapping: Dictionary~String, ReporterOptions~
-        -reporterExtensions: Array~ReporterExtension~
-        -statusItemManager: ReporterStatusItemManager
-        -cachedFilteredProcessAppNames: Array~String~
-        -timer: Timer?
-        +registerExtension(extension: ReporterExtension)
-        +send(data: ReportModel): Result
-        -monitor()
-        -prepareSend(windowInfo: FocusedWindowInfo?, mediaInfo: MediaInfo?)
-        -applyMappingRules(data: ReportModel)
-    }
-
-    class ReporterExtension {
-        <<protocol>>
-        +name: String
-        +isEnabled: Bool
-        +register(reporter: Reporter)
-        +unregister(reporter: Reporter)
-        +createReporterOptions(): ReporterOptions
-    }
-
-    class MixSpaceReporterExtension {
-        +name: String
-        +isEnabled: Bool
-        +createReporterOptions(): ReporterOptions
-    }
-
-    class S3ReporterExtension {
-        +name: String
-        +isEnabled: Bool
-        +createReporterOptions(): ReporterOptions
-    }
-
-    class SlackReporterExtension {
-        +name: String
-        +isEnabled: Bool
-        +createReporterOptions(): ReporterOptions
-    }
-
-    Reporter --> ReporterExtension
-    ReporterExtension <|-- MixSpaceReporterExtension
-    ReporterExtension <|-- S3ReporterExtension
-    ReporterExtension <|-- SlackReporterExtension
+flowchart TD
+  RAW["Raw application or media state"] --> SOURCE{"Source enabled?"}
+  SOURCE -->|No| DROP["Discard branch"]
+  SOURCE -->|Yes| RULE["Resolve rule using original bundle ID"]
+  RULE --> HIDE{"Effective Hide?"}
+  HIDE -->|Yes| DROP
+  HIDE -->|No| REDACT["Remove disallowed title or media fields"]
+  REDACT --> MAPPING["Apply Legacy Mapping"]
+  MAPPING --> ALIAS["Apply explicit alias"]
+  ALIAS --> SAFE["Sanitized ReportModel"]
+  SAFE --> PREVIEW["Menu and onboarding preview"]
+  SAFE --> SEND["Destination delivery"]
+  SAFE --> STORE["Sync Event persistence"]
 ```
 
-### 2. Application Monitoring (`Core/Utilities/ApplicationMonitor.swift`)
+`ReportModel.sourceProcessApplicationIdentifier` and `sourceMediaApplicationIdentifier` are transient. They preserve original identity for policy lookup and UI deep links when a Legacy Mapping rewrites the provider-facing identifier.
 
-Monitors focused windows and mouse clicks using macOS Accessibility APIs.
+Legacy `filteredProcesses` and `filteredMediaProcesses` remain fail-closed projections. `PresencePrivacyRulesRepository` merges them into effective rules and uses ordered writes so a newly added Hide cannot briefly expose data.
 
-```mermaid
-classDiagram
-    class ApplicationMonitor {
-        <<singleton>>
-        -mouseEventMonitor: Any?
-        -windowFocusObserver: Any?
-        +onMouseClicked: Callback
-        +onWindowFocusChanged: Callback
-        +startMouseMonitoring()
-        +startWindowFocusMonitoring()
-        +getFocusedWindowInfo(): FocusedWindowInfo?
-        -getWindowTitle(pid: pid_t): String?
-        -checkAndRequestAccessibilityPermissions()
-    }
+## Reporter Lifecycle and Cancellation
 
-    class FocusedWindowInfo {
-        +appName: String
-        +icon: NSImage?
-        +applicationIdentifier: String
-        +title: String?
-    }
+`Reporter` is main-actor isolated because capture callbacks, AppKit state, extension registration, and `ReportModel` are not child-task-safe. Destinations are executed sequentially from a registry snapshot. Asset-independent destinations are ordered before destinations that may request a public icon.
 
-    ApplicationMonitor --> FocusedWindowInfo
-```
-
-### 3. Media Tracking (`Core/MediaInfoManager/`)
-
-Provides a version-adaptive media tracking system.
-
-```mermaid
-classDiagram
-    class MediaInfoManager {
-        <<static>>
-        -provider: MediaInfoProvider
-        -playbackStateChangedCallback: Callback?
-        +startMonitoringPlaybackChanges(callback)
-        +stopMonitoringPlaybackChanges()
-        +getMediaInfo(): MediaInfo?
-    }
-
-    class MediaInfoProvider {
-        <<protocol>>
-        +startMonitoring(callback)
-        +stopMonitoring()
-        +getMediaInfo(): MediaInfo?
-    }
-
-    class CLIMediaInfoProvider {
-        -mediaControlPath: String
-        -process: Process?
-        -outputPipe: Pipe
-        +startMonitoring(callback)
-        +stopMonitoring()
-        +getMediaInfo(): MediaInfo?
-    }
-
-    class LegacyMediaInfoProvider {
-        -nowPlayingInfo: Dictionary?
-        +startMonitoring(callback)
-        +stopMonitoring()
-        +getMediaInfo(): MediaInfo?
-    }
-
-    MediaInfoManager --> MediaInfoProvider
-    MediaInfoProvider <|-- CLIMediaInfoProvider
-    MediaInfoProvider <|-- LegacyMediaInfoProvider
-```
-
-### 4. Database Layer (`Core/Database/`)
-
-SwiftData-based persistence layer with actor isolation for thread safety.
-
-```mermaid
-classDiagram
-    class Database {
-        <<actor>>
-        <<singleton>>
-        -modelContainer: ModelContainer?
-        +mainContext: ModelContext?
-        +initialize()
-        +createBackgroundContext(): ModelContext?
-        +performBackgroundTask(operation): T
-        +batchInsert(models)
-        +fetch(descriptor): Array~T~
-    }
-
-    class ReportModel {
-        <<@Model>>
-        +id: UUID
-        +processName: String?
-        +windowTitle: String?
-        +timeStamp: Date
-        +artist: String?
-        +mediaName: String?
-        +mediaProcessName: String?
-        +integrations: Array~String~
-        +setMediaInfo(mediaInfo)
-        +setProcessInfo(processInfo)
-    }
-
-    Database --> ReportModel
-```
-
-## Data Flow
-
-### 1. Window Focus Change Flow
+Preparation and delivery each have a generation counter:
 
 ```mermaid
 sequenceDiagram
-    participant User
-    participant macOS
-    participant AppMonitor as ApplicationMonitor
-    participant Reporter
-    participant Extensions
-    participant Database
-    participant ExternalAPI as External APIs
+  participant Change as Privacy or Source Change
+  participant Reporter
+  participant Destination
+  participant DataStore
 
-    User->>macOS: Changes window focus
-    macOS->>AppMonitor: NSWorkspace.didActivateApplicationNotification
-    AppMonitor->>AppMonitor: getFocusedWindowInfo()
-    AppMonitor->>AppMonitor: getWindowTitle() via Accessibility API
-    AppMonitor->>Reporter: onWindowFocusChanged(windowInfo)
-    Reporter->>Reporter: applyMappingRules()
-    Reporter->>Reporter: Check filters
-    
-    par Parallel Processing
-        Reporter->>Extensions: send(data) to each extension
-        Extensions->>ExternalAPI: HTTP/API calls
-    and
-        Reporter->>Database: Save report
-    end
-    
-    Extensions-->>Reporter: Results
-    Reporter->>Reporter: Update status icon
+  Reporter->>Destination: Send generation N
+  Change->>Reporter: Cancel pending work
+  Reporter->>Reporter: Increment generation to N+1
+  Destination-->>Reporter: Late completion for N
+  Reporter->>Reporter: Reject stale completion
+  Note over Reporter,DataStore: No stale Sync Event is persisted
 ```
 
-### 2. Media Playback Change Flow
+The generation is checked before and after asset resolution, each destination await, and persistence. `DataStore.saveReport` also checks task cancellation before insertion and before save. If a generation becomes stale immediately after save, its UUID is durably quarantined from History before physical deletion. Failed deletion remains suppressed and is retried on the next launch.
+
+Slack has a serialized delivery queue. Reporting operations can be cancelled without cancelling a required remote clear operation, and Alamofire requests receive task cancellation. Remote clears use bounded retries, retry again after network recovery, and are awaited within the application termination deadline. Discord clears again after a cancelled late SDK completion so an obsolete activity cannot reappear.
+
+When the network is unavailable, Reporter publishes only the sanitized local presentation and records a single “fresh capture required” marker. It does not enqueue or retain a report for replay. Recovery captures current application and media state and executes the complete generation and privacy pipeline again.
+
+Sleep stops monitoring sources, timers, preparation, and delivery. Wake recreates current sources from preferences after the application-level wake delay.
+
+## Destination and Asset Results
+
+Live presentation uses `PresenceDestinationDeliveryResult` and a separate `PresenceAssetResolution`. Aggregate status combines:
+
+- Onboarding and sharing state.
+- Network waiting as an internal runtime reason and Popover notice; the visible aggregate remains Degraded or Error according to delivery impact.
+- Per-destination sending, success, failure, and skipped state.
+- Independent asset degradation.
+
+S3 is represented by `S3AssetHostingService`. It resolves a cached public URL or performs an on-demand upload only when a registered destination declares optional or required public-URL capability. Failed uploads add only the local application identifier and display name to a durable retry queue; credentials and icon data are never persisted there. Maintenance can retry that queue or rebuild current cache records from installed application icons. Discord does not depend on S3 because it uses Discord asset keys.
+
+## Sync Event Persistence
+
+`Database` and `DataStore` are actors and are the only SwiftData boundary. The schema remains:
+
+- `ReportModel` for sanitized Presence scalars and history metadata.
+- `IconModel` for cached public application icon URLs.
+
+Modern audit metadata uses a versioned Codable envelope stored in the existing `ReportModel.integrationsData` field:
 
 ```mermaid
-sequenceDiagram
-    participant MediaApp as Media Application
-    participant MediaRemote
-    participant MediaManager as MediaInfoManager
-    participant Provider as MediaInfoProvider
-    participant Reporter
-    participant Database
-
-    MediaApp->>MediaRemote: Playback state change
-    MediaRemote->>Provider: Notification/CLI output
-    Provider->>Provider: Parse media info
-    Provider->>MediaManager: Callback with MediaInfo
-    MediaManager->>Reporter: playbackStateChangedCallback(mediaInfo)
-    Reporter->>Reporter: Combine with current window info
-    Reporter->>Reporter: prepareSend()
-    Reporter->>Database: Save combined report
+flowchart LR
+  DATA["integrationsData"] --> FORMAT{"Decode format"}
+  FORMAT -->|"Object v1"| MODERN["StoredSyncEventPayload"]
+  FORMAT -->|"String array"| LEGACY["Legacy Event adapter"]
+  FORMAT -->|"Invalid or unsupported"| BAD["Unreadable Event"]
 ```
 
-### 3. Periodic Reporting Flow
+This avoids a SwiftData schema migration while preserving old rows. Modern payloads contain only:
 
-```mermaid
-sequenceDiagram
-    participant Timer
-    participant Reporter
-    participant AppMonitor as ApplicationMonitor
-    participant MediaManager as MediaInfoManager
-    participant Extensions
+- Trigger reason.
+- Normalized per-destination state, timestamps, and fixed error code/message.
+- A safe output summary derived from the final provider render only when delivery succeeds.
+- Asset state and fallback usage without the public URL.
 
-    Timer->>Reporter: Timer fired
-    Reporter->>AppMonitor: getFocusedWindowInfo()
-    Reporter->>MediaManager: getMediaInfo()
-    Reporter->>Reporter: prepareSend(windowInfo, mediaInfo)
-    Reporter->>Extensions: Batch send to all extensions
-    Extensions-->>Reporter: Completion
+They do not contain raw capture objects, bundle identifiers, credentials, endpoints, request bodies, authorization headers, response bodies, icons, or artwork.
+
+Legacy integration arrays are adapted lazily. Recorded destinations are `Succeeded`; unrecorded current destinations are `Unknown`. A legacy `S3` entry becomes `Legacy Asset Result`. History is capped at 5,000 rows with oldest-first deletion.
+
+## Preferences and Migration
+
+`PresencePreferencesMigrator` uses ordered version steps:
+
+| Version | Migration |
+| --- | --- |
+| 1 | Distinguish new and existing installations; preserve prior window-title behavior and mark upgrades as onboarded |
+| 2 | Create application-centered privacy configuration and merge legacy filters |
+
+Version steps are independent. A version-1 user who later disables Window Titles is not passed through version 1 again during the version-2 migration.
+
+Settings export excludes credentials and retains legacy Filter and Mapping fields for compatibility. Import first validates a complete staged snapshot without mutation. Historical exports containing plaintext credentials then require an explicit restore, omit, or cancel decision. A restore aggregates MixSpace, Slack, and S3 changes into one `CredentialStore` transaction with redacted pending integration preferences; relays are published only after that transaction is durable. Import then pauses reporting, applies the remaining snapshot, reconciles legacy filters, and restores the requested sharing state only if a valid destination and credential authority are available. Truncated integration dictionaries are rejected atomically; legacy backups rebuild application rules from their complete filter snapshot.
+
+## Credential Authority
+
+Destination secrets use `CredentialStore`, backed by Keychain for stable signed builds and a protected local journal when Keychain identity is unavailable. Preference values are redacted. Multi-field changes are coordinated through `SettingsMutationCoordinator` and the credential journal so partial UI updates cannot become the authority. Reset and erase run as exclusive maintenance transactions that close mutation admission until completion.
+
+If the protected journal is unreadable, reporting fails closed. Recovery preserves the unreadable store before any re-entry workflow.
+
+## Advanced Maintenance
+
+`Reset Settings` restores default preference relays while preserving Sync History, icon cache, failed-upload queue, and protected credential values. `Erase All App Data` uses a separate two-confirmation path, pauses sharing and clears runtime secrets before its first suspension, then independently removes protected credentials, Sync History, icon cache, failed-upload queue, and upload fingerprints before restarting onboarding. Runtime state remains fail-closed even when one removal fails. An inaccessible legacy Keychain copy is reported rather than falsely claimed as removed.
+
+Diagnostics are deliberately sanitized. They include version, capability state, counts, destination count, and the latest fixed-code runtime error; they exclude Presence content, endpoints, credentials, and provider responses.
+
+## Verification Boundaries
+
+The primary verification commands are:
+
+```bash
+xcodebuild -project ProcessReporter.xcodeproj -scheme ProcessReporter \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  CODE_SIGNING_ALLOWED=NO SWIFT_STRICT_CONCURRENCY=complete build
+
+xcodebuild -project ProcessReporter.xcodeproj -scheme ProcessReporter \
+  -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  CODE_SIGNING_ALLOWED=NO SWIFT_STRICT_CONCURRENCY=complete analyze
 ```
 
-## Design Patterns
-
-### 1. Extension Architecture Pattern
-
-The reporter uses a plugin-based extension architecture allowing modular integration with external services.
-
-```swift
-protocol ReporterExtension {
-    var name: String { get }
-    var isEnabled: Bool { get }
-    func register(to reporter: Reporter) async
-    func unregister(from reporter: Reporter) async
-    func createReporterOptions() -> ReporterOptions
-}
-```
-
-**Benefits:**
-- Loose coupling between core and integrations
-- Easy to add new integrations
-- Each extension manages its own lifecycle
-- Failures are isolated per extension
-
-### 2. Observer Pattern
-
-Used extensively for reactive programming with RxSwift:
-
-```swift
-// Preference changes observation
-PreferencesDataModel.shared.isEnabled.subscribe { enabled in
-    if enabled {
-        self.monitor()
-    } else {
-        self.dispose()
-    }
-}
-```
-
-### 3. Singleton Pattern
-
-Used for shared managers that need global access:
-- `ApplicationMonitor.shared`
-- `Database.shared`
-- `AppUtility.shared`
-- `PreferencesDataModel.shared`
-
-### 4. Strategy Pattern
-
-Media info providers implement different strategies based on macOS version:
-
-```swift
-private static var provider: MediaInfoProvider = {
-    if #available(macOS 15.4, *) {
-        return CLIMediaInfoProvider()
-    } else {
-        return LegacyMediaInfoProvider()
-    }
-}()
-```
-
-### 5. Actor Pattern
-
-Database uses Swift's actor model for thread-safe operations:
-
-```swift
-actor Database {
-    func performBackgroundTask<T>(_ operation: @escaping (ModelContext) throws -> T) async throws -> T
-}
-```
-
-## Threading and Concurrency Model
-
-### 1. Main Actor Usage
-
-UI-related operations and state management run on the main actor:
-
-```swift
-@MainActor
-class Reporter {
-    // All UI updates happen on main thread
-}
-```
-
-### 2. Concurrent Extension Processing
-
-Extensions process reports concurrently using TaskGroup:
-
-```swift
-let results = await withTaskGroup(of: (String, Result<Void, ReporterError>).self) { group in
-    for (name, options) in mapping {
-        group.addTask {
-            let result = await options.onSend(data)
-            return (name, result)
-        }
-    }
-    // Collect results...
-}
-```
-
-### 3. Background Database Operations
-
-Database writes happen on background contexts:
-
-```swift
-try await Database.shared.performBackgroundTask { context in
-    context.insert(data)
-    try context.save()
-}
-```
-
-### 4. Timer-based Operations
-
-Periodic reporting uses main thread timers:
-
-```swift
-Timer.scheduledTimer(withTimeInterval: TimeInterval(interval.rawValue), repeats: true) { _ in
-    Task { @MainActor in
-        // Report current state
-    }
-}
-```
-
-### 5. Media Monitoring Thread
-
-CLI-based media monitoring runs on a separate thread:
-
-```swift
-DispatchQueue.global(qos: .userInteractive).async {
-    self.process?.waitUntilExit()
-}
-```
-
-## Performance Considerations
-
-### 1. Memory Management
-
-**Cache Management:**
-- App icon cache cleared during system sleep
-- Filtered app names cached to avoid repeated lookups
-- Mapping rules cached for performance
-
-```swift
-private func cleanupCachesBeforeSleep() {
-    AppUtility.shared.clearCache()
-    reporter?.clearCaches()
-    MediaInfoManager.stopMonitoringPlaybackChanges()
-}
-```
-
-**Lazy Loading:**
-- Icons loaded on-demand
-- Database queries paginated
-- Transient properties for computed values
-
-### 2. Database Optimization
-
-**Efficient Storage:**
-- Binary data storage for images instead of base64
-- JSON encoding for array properties
-- Unique constraints on IDs
-
-```swift
-// Store as Data instead of base64 string
-var mediaImageData: Data?
-
-@Transient
-var mediaImage: NSImage? {
-    get {
-        guard let data = mediaImageData else { return nil }
-        return NSImage(data: data)
-    }
-}
-```
-
-**Background Operations:**
-- All writes happen on background contexts
-- Batch operations supported
-- Transaction support for consistency
-
-### 3. Network Optimization
-
-**Rate Limiting:**
-- Built-in rate limiter for API calls
-- Exponential backoff for failures
-- Concurrent processing with timeout limits
-
-```swift
-enum ReporterError: Error {
-    case ratelimitExceeded(message: String)
-    // ...
-}
-```
-
-### 4. Event Handling
-
-**Debouncing:**
-- Window focus changes debounced
-- Media state changes consolidated
-- Timer-based reporting to reduce frequency
-
-**Filtering:**
-- System applications ignored
-- User-defined filters applied early
-- Mapping rules cached and applied efficiently
-
-## Security Architecture
-
-### 1. Permission Model
-
-**Required Permissions:**
-- Accessibility API access for window titles
-- Full Disk Access for broader monitoring
-- Network access for external integrations
-
-```swift
-private func checkAndRequestAccessibilityPermissions() {
-    let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
-    let accessibilityEnabled = AXIsProcessTrustedWithOptions(options as CFDictionary)
-    // ...
-}
-```
-
-### 2. Data Protection
-
-**Sensitive Data Handling:**
-- Window titles may contain sensitive information
-- Credentials stored in UserDefaults (should use Keychain)
-- No encryption for database (consideration for improvement)
-
-**Network Security:**
-- HTTPS for all external communications
-- API keys configurable per integration
-- No certificate pinning (potential improvement)
-
-### 3. Privacy Considerations
-
-**User Control:**
-- Granular filtering options
-- Enable/disable per integration
-- Clear data retention policies needed
-
-**Data Minimization:**
-- Only necessary data collected
-- Configurable reporting intervals
-- Local processing where possible
-
-## Technology Choices and Rationale
-
-### 1. Swift and SwiftUI/AppKit
-
-**Rationale:**
-- Native macOS development
-- Direct access to system APIs
-- Modern language features (actors, async/await)
-- Type safety and performance
-
-### 2. SwiftData
-
-**Rationale:**
-- Native Apple persistence framework
-- Automatic migration support
-- Type-safe queries
-- Integration with Swift concurrency
-
-**Trade-offs:**
-- Limited to Apple platforms
-- Newer framework with less community support
-- Migration complexity
-
-### 3. RxSwift
-
-**Rationale:**
-- Reactive programming for UI state
-- Well-established pattern
-- Good for preference management
-- Handles complex event streams
-
-**Trade-offs:**
-- Additional dependency
-- Learning curve
-- Could use Combine instead
-
-### 4. MediaRemote Framework
-
-**Rationale:**
-- Official macOS media playback API
-- System-wide media information
-- No third-party dependencies
-
-**Trade-offs:**
-- Private framework (stability concerns)
-- Limited documentation
-- Version-specific behavior
-
-### 5. Accessibility APIs
-
-**Rationale:**
-- Only way to get window titles on macOS
-- Official Apple API
-- Reliable and maintained
-
-**Trade-offs:**
-- Requires user permission
-- Privacy implications
-- Can be disabled by users
-
-### 6. Menu Bar Architecture
-
-**Rationale:**
-- Always accessible
-- Minimal UI footprint
-- Standard macOS pattern
-- Background operation
-
-**Trade-offs:**
-- Limited UI space
-- No dock presence by default
-- Discovery challenges for users
-
-## Future Architecture Considerations
-
-### 1. Enhanced Security
-- Keychain integration for credentials
-- Certificate pinning for API calls
-- Database encryption
-
-### 2. Performance Improvements
-- More aggressive caching strategies
-- Smarter batching of reports
-- Compression for network payloads
-
-### 3. Extensibility
-- Plugin system for custom extensions
-- JavaScript/Python extension support
-- WebSocket support for real-time reporting
-
-### 4. Monitoring Enhancements
-- Browser tab tracking
-- Terminal command tracking
-- File system activity monitoring
-
-### 5. Cross-Platform Considerations
-- Abstract platform-specific code
-- Consider Electron for wider platform support
-- Cloud sync for preferences
+Runtime and migration smoke tests must use an isolated bundle identifier and isolated Application Support directory. They must not mutate the installed application's preferences, Keychain authority, or production database.

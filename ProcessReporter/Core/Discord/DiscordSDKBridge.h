@@ -20,6 +20,8 @@ NS_ASSUME_NONNULL_BEGIN
                           error:(NSError *_Nullable)error;
 - (void)discordSDK:(DiscordSDKBridge *)bridge
     didCompleteActivityUpdateWithError:(NSError *_Nullable)error;
+- (void)discordSDK:(DiscordSDKBridge *)bridge
+    didCompleteActivityClearWithError:(NSError *_Nullable)error;
 @end
 
 @interface DiscordSDKBridge : NSObject

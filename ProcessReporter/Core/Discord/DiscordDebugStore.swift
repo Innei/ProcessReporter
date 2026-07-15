@@ -11,8 +11,6 @@ struct DiscordDebugSnapshot {
     var lastUpdate: Date?
     var lastOutcome: String = "No activity yet"
     var lastReason: String? = nil
-    var lastReportSummary: String? = nil
-    var lastPresenceSummary: String? = nil
     var clientKind: String = "unknown"
     var isConnected: Bool = false
 }
@@ -46,16 +44,6 @@ final class DiscordDebugStore: @unchecked Sendable {
         lines.append("Outcome: \(snap.lastOutcome)")
         if let reason = snap.lastReason, !reason.isEmpty {
             lines.append("Reason: \(reason)")
-        }
-        if let report = snap.lastReportSummary, !report.isEmpty {
-            lines.append("")
-            lines.append("Report:")
-            lines.append(report)
-        }
-        if let presence = snap.lastPresenceSummary, !presence.isEmpty {
-            lines.append("")
-            lines.append("Presence:")
-            lines.append(presence)
         }
         return lines.joined(separator: "\n")
     }

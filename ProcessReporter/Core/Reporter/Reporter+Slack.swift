@@ -14,6 +14,15 @@ private struct ProfileData: Codable, Sendable {
 	var status_text: String
 	var status_emoji: String
 	var status_expiration: Int
+
+	var deliveryOutputSummary: SyncOutputSummary {
+		SyncOutputSummary(
+			title: status_text.isEmpty ? nil : status_text,
+			subtitle: status_emoji.isEmpty ? nil : status_emoji,
+			detail: status_expiration > 0 ? "Expiration: \(status_expiration)" : nil,
+			activityKind: "status"
+		)
+	}
 }
 
 private struct SlackAPIResponse: Decodable, Sendable {
@@ -37,9 +46,27 @@ private let allowedTemplateVariants: Set<String> = [
 
 private let maximumSlackStatusDuration = 366 * 24 * 60 * 60
 
+private final class SlackNetworkObservation: @unchecked Sendable {
+	let token: NSObjectProtocol
+
+	init(token: NSObjectProtocol) {
+		self.token = token
+	}
+
+	deinit {
+		NotificationCenter.default.removeObserver(token)
+	}
+}
+
 @MainActor
 private final class SlackDeliveryQueue {
+	private struct QueuedOperation {
+		let requiresReportingAllowed: Bool
+		let task: Task<Result<Void, ReporterError>, Never>
+	}
+
 	private var tail: Task<Void, Never>?
+	private var operations: [UUID: QueuedOperation] = [:]
 
 	func enqueue(
 		profile: ProfileData,
@@ -47,18 +74,41 @@ private final class SlackDeliveryQueue {
 		requiresReportingAllowed: Bool
 	) -> Task<Result<Void, ReporterError>, Never> {
 		let previous = tail
-		let operation = Task { @MainActor in
+		let operationID = UUID()
+		let operation = Task<Result<Void, ReporterError>, Never> { @MainActor [weak self] in
 			await previous?.value
-			return await Self.deliver(
+			guard !Task.isCancelled else {
+				self?.operations.removeValue(forKey: operationID)
+				return .failure(.cancelled(message: "Slack delivery was cancelled"))
+			}
+			let result = await Self.deliver(
 				profile: profile,
 				token: token,
 				requiresReportingAllowed: requiresReportingAllowed
 			)
+			self?.operations.removeValue(forKey: operationID)
+			return result
 		}
+		operations[operationID] = QueuedOperation(
+			requiresReportingAllowed: requiresReportingAllowed,
+			task: operation
+		)
 		tail = Task { @MainActor in
 			_ = await operation.value
 		}
 		return operation
+	}
+
+	func cancelReportingOperations() {
+		for operation in operations.values where operation.requiresReportingAllowed {
+			operation.task.cancel()
+		}
+	}
+
+	func cancelAllOperations() {
+		for operation in operations.values {
+			operation.task.cancel()
+		}
 	}
 
 	private static func deliver(
@@ -72,24 +122,26 @@ private final class SlackDeliveryQueue {
 		guard !requiresReportingAllowed || PreferencesDataModel.reportingAllowed else {
 			return .failure(.ignored)
 		}
-		// Every queued operation waits for a limiter slot. In particular, a publish
-		// queued immediately after a clear must not fail simply because the clear
-		// consumed the previous slot.
-		var remainingWaitAttempts = 12
-		while !slackRatelimiter.tryAcquire() {
-			guard !requiresReportingAllowed || PreferencesDataModel.reportingAllowed else {
-				return .failure(.ignored)
-			}
-			guard remainingWaitAttempts > 0 else {
-				return .failure(
-					.ratelimitExceeded(message: "Slack integration is rate limited")
-				)
-			}
-			remainingWaitAttempts -= 1
-			do {
-				try await Task.sleep(nanoseconds: 1_000_000_000)
-			} catch {
-				return .failure(.cancelled(message: "Slack delivery was cancelled"))
+		// User-visible publishes remain locally rate limited. Remote cleanup is a
+		// lifecycle safety operation and must be able to run within the bounded app
+		// termination window instead of waiting behind the publish interval.
+		if requiresReportingAllowed {
+			var remainingWaitAttempts = 12
+			while !slackRatelimiter.tryAcquire() {
+				guard PreferencesDataModel.reportingAllowed else {
+					return .failure(.ignored)
+				}
+				guard remainingWaitAttempts > 0 else {
+					return .failure(
+						.ratelimitExceeded(message: "Slack integration is rate limited")
+					)
+				}
+				remainingWaitAttempts -= 1
+				do {
+					try await Task.sleep(nanoseconds: 1_000_000_000)
+				} catch {
+					return .failure(.cancelled(message: "Slack delivery was cancelled"))
+				}
 			}
 		}
 		guard !PreferencesDataModel.integrationCredentialStoreUnavailable else {
@@ -100,28 +152,38 @@ private final class SlackDeliveryQueue {
 		}
 
 		do {
+			try Task.checkCancellation()
 			let headers: HTTPHeaders = [
 				"Authorization": "Bearer " + token,
 				"Content-Type": "application/json; charset=utf-8",
 			]
-			let response = try await AF.request(
+			let request = AF.request(
 				URL(string: stackEndpoint)!,
 				method: .post,
 				parameters: ["profile": profile],
 				encoder: JSONParameterEncoder.default,
 				headers: headers,
 				requestModifier: { request in
-					request.timeoutInterval = 10
+					request.timeoutInterval = requiresReportingAllowed ? 10 : 3
+				}
+			).validate()
+			let response = try await withTaskCancellationHandler(
+				operation: {
+					try await request
+						.serializingDecodable(SlackAPIResponse.self)
+						.value
+				},
+				onCancel: {
+					request.cancel()
 				}
 			)
-			.validate()
-			.serializingDecodable(SlackAPIResponse.self)
-			.value
 			guard response.ok else {
 				let reason = response.error ?? "unknown_error"
 				return .failure(.networkError("Slack API rejected request: \(reason)"))
 			}
 			return .success(())
+		} catch is CancellationError {
+			return .failure(.cancelled(message: "Slack delivery was cancelled"))
 		} catch {
 			NSLog(
 				"Slack request failed: \(error.asAFError?.localizedDescription ?? error.localizedDescription)"
@@ -136,9 +198,33 @@ class SlackReporterExtension: ReporterExtension {
 	private let deliveryQueue = SlackDeliveryQueue()
 	private var potentialStatusGenerationByToken: [String: UInt64] = [:]
 	private var pendingClearGenerationByToken: [String: UInt64] = [:]
-	private var retryClearGenerationByToken: [String: UInt64] = [:]
 	private var statusGeneration: UInt64 = 0
 	private var observedConfigurationToken: String?
+	private let maximumClearRetryCount = 3
+	private var networkAvailabilityObservation: SlackNetworkObservation?
+	private var cleanupDeadlineExpired = false
+
+	init() {
+		let token = NotificationCenter.default.addObserver(
+			forName: .processReporterNetworkAvailabilityDidChange,
+			object: nil,
+			queue: .main
+		) { [weak self] notification in
+			guard notification.userInfo?[NetworkAvailabilityNotificationKey.isAvailable]
+				as? Bool == true
+			else { return }
+			Task { @MainActor [weak self] in
+				self?.enqueuePendingClears()
+			}
+		}
+		networkAvailabilityObservation = SlackNetworkObservation(token: token)
+		// Seed cleanup ownership even when sharing is paused and this extension is
+		// never registered during the current process. A later token deletion must
+		// still clear a status left by the previous app run.
+		observeConfigurationToken(
+			PreferencesDataModel.shared.slackIntegration.value.apiToken
+		)
+	}
 
 	var isEnabled: Bool {
 		return PreferencesDataModel.shared.slackIntegration.value.isEnabled
@@ -237,11 +323,19 @@ class SlackReporterExtension: ReporterExtension {
 			// main actor without an intervening suspension, a later sleep/disable clear
 			// is guaranteed to be queued behind this possibly successful publish.
 			self.markPotentialStatus(for: token, isPublish: true)
-			return await self.deliveryQueue.enqueue(
+			let deliveryResult = await self.deliveryQueue.enqueue(
 				profile: profile,
 				token: token,
 				requiresReportingAllowed: true
 			).value
+			switch deliveryResult {
+			case .success:
+				return .success(
+					ReporterDeliveryReceipt(outputSummary: profile.deliveryOutputSummary)
+				)
+			case .failure(let error):
+				return .failure(error)
+			}
 		}
 	}
 
@@ -269,8 +363,25 @@ class SlackReporterExtension: ReporterExtension {
 	}
 
 	func clearReportedState() {
+		deliveryQueue.cancelReportingOperations()
 		guard !PreferencesDataModel.integrationCredentialStoreUnavailable else { return }
 		enqueuePendingClears()
+	}
+
+	func waitForPendingCleanup(until deadline: ContinuousClock.Instant) async {
+		let clock = ContinuousClock()
+		while !pendingClearGenerationByToken.isEmpty, clock.now < deadline {
+			guard !Task.isCancelled else { break }
+			do {
+				try await Task.sleep(for: .milliseconds(100))
+			} catch {
+				break
+			}
+		}
+		guard !pendingClearGenerationByToken.isEmpty else { return }
+		cleanupDeadlineExpired = true
+		deliveryQueue.cancelAllOperations()
+		pendingClearGenerationByToken.removeAll()
 	}
 
 	private func markPotentialStatusIfNeeded(for token: String) {
@@ -297,7 +408,9 @@ class SlackReporterExtension: ReporterExtension {
 	}
 
 	private func enqueuePendingClears(excluding retainedToken: String? = nil) {
-		guard !PreferencesDataModel.integrationCredentialStoreUnavailable else { return }
+		guard !cleanupDeadlineExpired,
+			!PreferencesDataModel.integrationCredentialStoreUnavailable
+		else { return }
 		let candidates = potentialStatusGenerationByToken
 			.filter { token, _ in
 				token != retainedToken
@@ -306,17 +419,20 @@ class SlackReporterExtension: ReporterExtension {
 
 		for (token, generation) in candidates {
 			if pendingClearGenerationByToken[token] == generation {
-				// A later clear request is already covered by this operation. Remember
-				// that request so a failed operation receives one follow-up attempt.
-				retryClearGenerationByToken[token] = generation
 				continue
 			}
 			enqueueClear(for: token, generation: generation)
 		}
 	}
 
-	private func enqueueClear(for token: String, generation: UInt64) {
-		guard !PreferencesDataModel.integrationCredentialStoreUnavailable else { return }
+	private func enqueueClear(
+		for token: String,
+		generation: UInt64,
+		retryCount: Int = 0
+	) {
+		guard !cleanupDeadlineExpired,
+			!PreferencesDataModel.integrationCredentialStoreUnavailable
+		else { return }
 		pendingClearGenerationByToken[token] = generation
 		let operation = deliveryQueue.enqueue(
 			profile: ProfileData(
@@ -332,15 +448,16 @@ class SlackReporterExtension: ReporterExtension {
 			guard let self else { return }
 			let isLatestPendingClear =
 				self.pendingClearGenerationByToken[token] == generation
-			if isLatestPendingClear {
-				self.pendingClearGenerationByToken.removeValue(forKey: token)
+			guard !self.cleanupDeadlineExpired else {
+				if isLatestPendingClear {
+					self.pendingClearGenerationByToken.removeValue(forKey: token)
+				}
+				return
 			}
-			let shouldRetry = self.retryClearGenerationByToken[token] == generation
-			if shouldRetry {
-				self.retryClearGenerationByToken.removeValue(forKey: token)
-			}
-
 			if case .success = result {
+				if isLatestPendingClear {
+					self.pendingClearGenerationByToken.removeValue(forKey: token)
+				}
 				// Preserve the token when another publish was enqueued after this
 				// clear. Its newer generation may still own a remote status.
 				if self.potentialStatusGenerationByToken[token] == generation {
@@ -351,10 +468,40 @@ class SlackReporterExtension: ReporterExtension {
 
 			NSLog("Slack status clear was deferred: \(String(describing: result))")
 			guard isLatestPendingClear,
-				shouldRetry,
 				self.potentialStatusGenerationByToken[token] == generation
-			else { return }
-			self.enqueueClear(for: token, generation: generation)
+			else {
+				if isLatestPendingClear {
+					self.pendingClearGenerationByToken.removeValue(forKey: token)
+				}
+				return
+			}
+
+			guard retryCount < self.maximumClearRetryCount else {
+				// Keep the potential status generation. A later network recovery or
+				// lifecycle transition can enqueue another bounded retry sequence.
+				self.pendingClearGenerationByToken.removeValue(forKey: token)
+				return
+			}
+			let retryDelay = Duration.seconds(1 << retryCount)
+			do {
+				try await Task.sleep(for: retryDelay)
+			} catch {
+				self.pendingClearGenerationByToken.removeValue(forKey: token)
+				return
+			}
+			guard self.pendingClearGenerationByToken[token] == generation,
+				self.potentialStatusGenerationByToken[token] == generation
+			else {
+				if self.pendingClearGenerationByToken[token] == generation {
+					self.pendingClearGenerationByToken.removeValue(forKey: token)
+				}
+				return
+			}
+			self.enqueueClear(
+				for: token,
+				generation: generation,
+				retryCount: retryCount + 1
+			)
 		}
 	}
 

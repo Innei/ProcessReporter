@@ -145,6 +145,27 @@ extension MixSpaceIntegration {
 		return integration
 	}
 
+	/// Decodes an exported integration only after validating the complete
+	/// non-secret contract. `fromDictionary` remains intentionally tolerant for
+	/// historical internal callers; settings import must not use its defaulting
+	/// behavior because a truncated dictionary could otherwise clear a working
+	/// configuration while still being reported as a successful restore.
+	static func validatedImportDictionary(_ dict: [String: Any]) -> MixSpaceIntegration? {
+		guard let isEnabled = dict["isEnabled"] as? Bool,
+		      let endpoint = dict["endpoint"] as? String,
+		      let requestMethod = dict["requestMethod"] as? String,
+		      ["POST", "PUT", "DELETE", "PATCH"].contains(requestMethod),
+		      dict["apiToken"].map({ $0 is String }) ?? true
+		else { return nil }
+
+		return MixSpaceIntegration(
+			isEnabled: isEnabled,
+			apiToken: "",
+			endpoint: endpoint,
+			requestMethod: requestMethod
+		)
+	}
+
 	func toStorable() -> Any? {
 		var storedValue = self
 		storedValue.apiToken = ""
@@ -224,6 +245,39 @@ extension SlackIntegration {
 		return integration
 	}
 
+	static func validatedImportDictionary(_ dict: [String: Any]) -> SlackIntegration? {
+		guard let isEnabled = dict["isEnabled"] as? Bool,
+		      let globalCustomEmoji = dict["globalCustomEmoji"] as? String,
+		      let statusTextTemplateString = dict["statusTextTemplateString"] as? String,
+		      let expiration = dict["expiration"] as? Int,
+		      (1 ... 86_400).contains(expiration),
+		      let defaultEmoji = dict["defaultEmoji"] as? String,
+		      let defaultStatusText = dict["defaultStatusText"] as? String,
+		      let conditionDictionaries = dict["customEmojiConditionList"] as? [[String: Any]],
+		      dict["apiToken"].map({ $0 is String }) ?? true
+		else { return nil }
+
+		var conditions: [EmojiConditionList.EmojiCondition] = []
+		conditions.reserveCapacity(conditionDictionaries.count)
+		for conditionDictionary in conditionDictionaries {
+			guard let when = conditionDictionary["when"] as? String,
+			      let emoji = conditionDictionary["emoji"] as? String
+			else { return nil }
+			conditions.append(.init(when: when, emoji: emoji))
+		}
+
+		return SlackIntegration(
+			isEnabled: isEnabled,
+			apiToken: "",
+			globalCustomEmoji: globalCustomEmoji,
+			statusTextTemplateString: statusTextTemplateString,
+			expiration: expiration,
+			defaultEmoji: defaultEmoji,
+			defaultStatusText: defaultStatusText,
+			customEmojiConditionList: .init(conditions: conditions)
+		)
+	}
+
 	func toStorable() -> Any? {
 		var storedValue = self
 		storedValue.apiToken = ""
@@ -296,6 +350,42 @@ extension S3Integration {
 		return integration
 	}
 
+	static func validatedImportDictionary(_ dict: [String: Any]) -> S3Integration? {
+		guard let isEnabled = dict["isEnabled"] as? Bool,
+		      let bucket = dict["bucket"] as? String,
+		      let region = dict["region"] as? String,
+		      let endpoint = dict["endpoint"] as? String,
+		      let path = dict["path"] as? String,
+		      dict["accessKey"].map({ $0 is String }) ?? true,
+		      dict["secretKey"].map({ $0 is String }) ?? true
+		else { return nil }
+
+		let customDomain: String
+		if let rawCustomDomain = dict["customDomain"] {
+			guard let value = rawCustomDomain as? String else { return nil }
+			customDomain = value
+		} else {
+			// The first S3 export schema predated custom domains and included both
+			// credential keys. Requiring that exact fingerprint distinguishes it
+			// from a truncated modern, credential-redacted export.
+			guard dict["accessKey"] is String, dict["secretKey"] is String else {
+				return nil
+			}
+			customDomain = ""
+		}
+
+		return S3Integration(
+			isEnabled: isEnabled,
+			bucket: bucket,
+			region: region,
+			accessKey: "",
+			secretKey: "",
+			endpoint: endpoint,
+			path: path,
+			customDomain: customDomain
+		)
+	}
+
 	func toStorable() -> Any? {
 		var storedValue = self
 		storedValue.accessKey = ""
@@ -354,19 +444,47 @@ extension PreferencesDataModel {
     /// Keep every Reporter entry point fail-closed even if a caller writes to the
     /// persisted `isEnabled` relay while the journal is unavailable.
     static var reportingAllowed: Bool {
-        isEnabled.value && !integrationCredentialStoreUnavailable
+        isEnabled.value
+            && !integrationCredentialStoreUnavailable
+            && hasCompletedOnboarding.value
+            && hasEnabledConfiguredPresenceDestination
+    }
+
+    /// S3 is asset infrastructure and never satisfies the destination invariant.
+    /// A Presence session is runnable only when at least one real destination is
+    /// both enabled and minimally configured.
+    static var hasEnabledConfiguredPresenceDestination: Bool {
+        let mixSpace = mixSpaceIntegration.value
+        let slack = slackIntegration.value
+        let discord = discordIntegration.value
+
+        return (mixSpace.isEnabled && mixSpace.isValidPresenceDestination)
+            || (slack.isEnabled && slack.isValidPresenceDestination)
+            || (discord.isEnabled && discord.isValidPresenceDestination)
     }
 
     /// Applies a user- or import-requested reporting state without allowing an
     /// unreadable credential authority to be bypassed.
     @discardableResult
     static func setReportingEnabled(_ requestedValue: Bool) -> Bool {
-        guard !requestedValue || !integrationCredentialStoreUnavailable else {
+        guard !requestedValue
+                || (!integrationCredentialStoreUnavailable
+                    && hasCompletedOnboarding.value
+                    && hasEnabledConfiguredPresenceDestination)
+        else {
             isEnabled.accept(false)
             return false
         }
         isEnabled.accept(requestedValue)
         return true
+    }
+
+    /// Configuration editors may disable or invalidate the final destination
+    /// while sharing is active. Reconcile that transition immediately so the
+    /// persisted master switch cannot claim to be running without a receiver.
+    static func pauseReportingIfDestinationUnavailable() {
+        guard isEnabled.value, !hasEnabledConfiguredPresenceDestination else { return }
+        isEnabled.accept(false)
     }
 
     /// Loads Keychain-backed credentials before the Reporter subscribes to the
@@ -562,6 +680,81 @@ extension PreferencesDataModel {
     }
 }
 
+private extension String {
+    var hasNonWhitespaceContent: Bool {
+        !trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+extension MixSpaceIntegration {
+    var hasPresenceDestinationConfiguration: Bool {
+        endpoint.hasNonWhitespaceContent || apiToken.hasNonWhitespaceContent
+    }
+
+    var isValidPresenceDestination: Bool {
+        guard apiToken.hasNonWhitespaceContent,
+              let components = URLComponents(
+                string: endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+              ),
+              let scheme = components.scheme?.lowercased(),
+              let host = components.host,
+              components.user == nil,
+              components.password == nil,
+              components.url != nil
+        else { return false }
+        return scheme == "https" || (scheme == "http" && isLoopbackHost(host))
+    }
+}
+
+extension SlackIntegration {
+    var hasPresenceDestinationConfiguration: Bool {
+        apiToken.hasNonWhitespaceContent
+    }
+
+    var isValidPresenceDestination: Bool {
+        apiToken.hasNonWhitespaceContent
+    }
+}
+
+extension DiscordIntegration {
+    var hasPresenceDestinationConfiguration: Bool {
+        applicationId.hasNonWhitespaceContent
+    }
+
+    var isValidPresenceDestination: Bool {
+        guard let value = Int64(
+            applicationId.trimmingCharacters(in: .whitespacesAndNewlines)
+        ) else { return false }
+        return value > 0
+    }
+}
+
+extension S3Integration {
+    var hasAssetHostingConfiguration: Bool {
+        isEnabled
+            || [bucket, accessKey, secretKey, endpoint, path, customDomain]
+                .contains(where: \.hasNonWhitespaceContent)
+    }
+
+    var isValidAssetHostingConfiguration: Bool {
+        guard [bucket, region, accessKey, secretKey]
+            .allSatisfy(\.hasNonWhitespaceContent)
+        else { return false }
+
+        if endpoint.hasNonWhitespaceContent,
+           validatedSecurePublicURL(endpoint) == nil
+        {
+            return false
+        }
+        if customDomain.hasNonWhitespaceContent,
+           validatedSecurePublicURL(customDomain) == nil
+        {
+            return false
+        }
+        return true
+    }
+}
+
 // MARK: - Discord Integration Model
 
 struct DiscordIntegration: UserDefaultsJSONStorable, DictionaryConvertible {
@@ -637,6 +830,65 @@ extension DiscordIntegration {
         integration.buttonUrl = dict["buttonUrl"] as? String ?? ""
         return integration
     }
+
+	static func validatedImportDictionary(_ dict: [String: Any]) -> DiscordIntegration? {
+		guard let isEnabled = dict["isEnabled"] as? Bool,
+		      let applicationId = dict["applicationId"] as? String,
+		      let showProcessInfo = dict["showProcessInfo"] as? Bool,
+		      let showMediaInfo = dict["showMediaInfo"] as? Bool,
+		      let prioritizeMedia = dict["prioritizeMedia"] as? Bool,
+		      let showTimestamps = dict["showTimestamps"] as? Bool,
+		      let customLargeImageKey = dict["customLargeImageKey"] as? String,
+		      let customLargeImageText = dict["customLargeImageText"] as? String,
+		      let brandSmallImageKey = dict["brandSmallImageKey"] as? String
+		else { return nil }
+
+		let useListeningForMedia: Bool
+		if let rawUseListeningForMedia = dict["useListeningForMedia"] {
+			guard let value = rawUseListeningForMedia as? Bool else { return nil }
+			useListeningForMedia = value
+		} else {
+			useListeningForMedia = true
+		}
+
+		let buttonKeys = ["enableButtons", "buttonLabel", "buttonUrl"]
+		let suppliedButtonKeyCount = buttonKeys.filter { dict[$0] != nil }.count
+		guard suppliedButtonKeyCount == 0 || suppliedButtonKeyCount == buttonKeys.count else {
+			return nil
+		}
+		let enableButtons: Bool
+		let buttonLabel: String
+		let buttonUrl: String
+		if suppliedButtonKeyCount == buttonKeys.count {
+			guard let importedEnableButtons = dict["enableButtons"] as? Bool,
+			      let importedButtonLabel = dict["buttonLabel"] as? String,
+			      let importedButtonURL = dict["buttonUrl"] as? String
+			else { return nil }
+			enableButtons = importedEnableButtons
+			buttonLabel = importedButtonLabel
+			buttonUrl = importedButtonURL
+		} else {
+			enableButtons = false
+			buttonLabel = ""
+			buttonUrl = ""
+		}
+
+		return DiscordIntegration(
+			isEnabled: isEnabled,
+			applicationId: applicationId,
+			showProcessInfo: showProcessInfo,
+			showMediaInfo: showMediaInfo,
+			prioritizeMedia: prioritizeMedia,
+			useListeningForMedia: useListeningForMedia,
+			showTimestamps: showTimestamps,
+			customLargeImageKey: customLargeImageKey,
+			customLargeImageText: customLargeImageText,
+			brandSmallImageKey: brandSmallImageKey,
+			enableButtons: enableButtons,
+			buttonLabel: buttonLabel,
+			buttonUrl: buttonUrl
+		)
+	}
 }
 
 extension PreferencesDataModel {

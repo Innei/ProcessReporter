@@ -92,6 +92,16 @@ final class AppUtility: @unchecked Sendable {
         return appInfo
     }
 
+    /// Reloads metadata from the current installed application. Maintenance
+    /// uses this path so rebuilding hosted icons cannot reuse a stale in-memory
+    /// image after an application update.
+    func refreshAppInfo(for bundleID: String) -> AppInfo {
+        cacheLock.lock()
+        appInfoCache.removeValue(forKey: bundleID)
+        cacheLock.unlock()
+        return getAppInfo(for: bundleID)
+    }
+
     /// 根据应用名称查找 Bundle ID
     /// - Parameter appName: 应用显示名称
     /// - Returns: 如果找到，返回对应的 Bundle ID，否则返回 nil

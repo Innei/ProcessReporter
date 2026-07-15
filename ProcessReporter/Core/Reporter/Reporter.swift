@@ -1,7 +1,8 @@
 import Cocoa
+import RxCocoa
 @preconcurrency import RxSwift
 
-enum ReporterError: Error {
+enum ReporterError: Error, Sendable {
 	case networkError(String)
 	case cancelled(message: String)
 	case unknown(message: String, successIntegrations: [String])
@@ -10,28 +11,114 @@ enum ReporterError: Error {
 	case databaseError(String)
 }
 
+extension ReporterError {
+	var presenceUserFacingMessage: String {
+		switch self {
+		case .networkError:
+			return "The destination could not be reached."
+		case .cancelled(let message):
+			return message
+		case .unknown:
+			return "The destination returned an unexpected response."
+		case .ratelimitExceeded:
+			return "The destination rate limit was reached."
+		case .ignored:
+			return "This Presence did not require an update."
+		case .databaseError:
+			return "Local Presence data could not be updated."
+		}
+	}
+
+	var persistenceCode: String {
+		switch self {
+		case .networkError:
+			return "network_error"
+		case .cancelled:
+			return "cancelled"
+		case .unknown:
+			return "unexpected_response"
+		case .ratelimitExceeded:
+			return "rate_limited"
+		case .ignored:
+			return "not_applicable"
+		case .databaseError:
+			return "local_database"
+		}
+	}
+
+	var persistenceMessage: String {
+		switch self {
+		case .networkError:
+			return "The destination could not be reached."
+		case .cancelled:
+			return "The destination delivery was cancelled."
+		case .unknown:
+			return "The destination returned an unexpected response."
+		case .ratelimitExceeded:
+			return "The destination rate limit was reached."
+		case .ignored:
+			return "This Presence did not require an update."
+		case .databaseError:
+			return "The destination could not update its local state."
+		}
+	}
+}
+
 enum SendError: Error {
 	case failure([String])
 	case persistenceFailure(message: String, successfulIntegrations: [String])
 }
 
+struct ReporterDeliveryReceipt: Sendable {
+	let outputSummary: SyncOutputSummary
+}
+
+typealias ReporterDeliveryResult = Result<ReporterDeliveryReceipt, ReporterError>
+
 struct ReporterOptions {
 	let priority: Int
-	let onSend: @MainActor (_ data: ReportModel) async -> Result<Void, ReporterError>
+	let assetCapability: PresenceAssetCapability
+	let onSend: @MainActor @Sendable (
+		_ data: ReportModel,
+		_ assetResolution: PresenceAssetResolution
+	) async -> ReporterDeliveryResult
 
 	init(
 		priority: Int = 100,
-		onSend: @escaping @MainActor (_ data: ReportModel) async -> Result<Void, ReporterError>
+		assetCapability: PresenceAssetCapability = .unsupported,
+		onSend: @escaping @MainActor @Sendable (
+			_ data: ReportModel
+		) async -> ReporterDeliveryResult
 	) {
 		self.priority = priority
-		self.onSend = onSend
+		self.assetCapability = assetCapability
+		self.onSend = { data, _ in await onSend(data) }
+	}
+
+	init(
+		priority: Int = 100,
+		assetCapability: PresenceAssetCapability,
+		onSendWithAsset: @escaping @MainActor @Sendable (
+			_ data: ReportModel,
+			_ assetResolution: PresenceAssetResolution
+		) async -> ReporterDeliveryResult
+	) {
+		self.priority = priority
+		self.assetCapability = assetCapability
+		self.onSend = onSendWithAsset
 	}
 }
 
 @MainActor
 class Reporter {
+	private struct PendingPresence {
+		let report: ReportModel
+		let trigger: SyncEventTrigger
+	}
+
 	private var mapping = [String: ReporterOptions]()
 	private var statusItemManager = ReporterStatusItemManager()
+	private let assetHostingService: any AssetHostingService
 
 	// Add reporter extensions array
 	private var reporterExtensions: [ReporterExtension] = []
@@ -39,15 +126,19 @@ class Reporter {
 	private var cachedFilteredProcessBundleIDs = Set<String>()
 	private var cachedFilteredMediaBundleIDs = Set<String>()
 	private var cachedFilteredMediaAppNames = Set<String>()
+	private var privacyConfigurationCache = PresencePrivacyConfiguration.newInstallation
 	private let disposeBag = DisposeBag()
 	private var isMonitoring = false
 	private var isProcessMonitoring = false
 	private var isMediaMonitoring = false
 	private var preparationGeneration = 0
 	private var preparationTask: Task<Void, Never>?
-	private var pendingReport: ReportModel?
+	private var hasPendingNetworkRefresh = false
+	private var networkRecoveryTask: Task<Void, Never>?
+	private var pendingPresence: PendingPresence?
 	private var sendGeneration = 0
 	private var sendTask: Task<Void, Never>?
+	private var activeSendTaskCount = 0
 	private var isSuspendedForSleep = false
 
 	// Mapping cache
@@ -96,6 +187,39 @@ class Reporter {
 		updateExtensions()
 	}
 
+	public func shutdown(pendingCleanupTimeout: Duration = .seconds(5)) async {
+		// handleSleep cancels all publish work and asks every extension to clear its
+		// remote state. Invoke clear again so termination while already suspended
+		// still retries cleanup that may have been deferred while offline.
+		handleSleep()
+		clearReportedState()
+
+		let clock = ContinuousClock()
+		let deadline = clock.now.advanced(by: pendingCleanupTimeout)
+		_ = await waitForPendingReportWork(until: deadline)
+		for reporterExtension in reporterExtensions {
+			await reporterExtension.waitForPendingCleanup(until: deadline)
+		}
+	}
+
+	/// Waits only for local delivery and History work to become quiescent.
+	/// Remote destination cleanup has a separate lifecycle so database ownership
+	/// can be released as soon as no cancelled send can still roll back a row.
+	public func waitForPendingReportWork(
+		until deadline: ContinuousClock.Instant
+	) async -> Bool {
+		let clock = ContinuousClock()
+		while activeSendTaskCount > 0, clock.now < deadline {
+			guard !Task.isCancelled else { break }
+			do {
+				try await Task.sleep(for: .milliseconds(25))
+			} catch {
+				break
+			}
+		}
+		return activeSendTaskCount == 0
+	}
+
 	// Register a reporter extension
 	public func registerExtension(_ extension: ReporterExtension) {
 		reporterExtensions.append(`extension`)
@@ -122,7 +246,7 @@ class Reporter {
 	}
 
 	private func clearReportedState() {
-		for ext in reporterExtensions where ext.isEnabled {
+		for ext in reporterExtensions {
 			ext.clearReportedState()
 		}
 	}
@@ -135,46 +259,202 @@ class Reporter {
 		mapping.removeValue(forKey: name)
 	}
 
-	public func send(data: ReportModel) async -> Result<[String], SendError> {
+	private func send(
+		data: ReportModel,
+		generation: Int,
+		trigger: SyncEventTrigger
+	) async -> Result<[String], SendError> {
 		var successNames = [String]()
 		var failureNames = [String]()
 		var skippedNames = [String]()
+		var deliveryResults = [PresenceDestinationDeliveryResult]()
+		var storedDeliveryResults = [SyncDeliveryResult]()
+		guard isDeliveryCurrent(generation) else { return .success([]) }
 
 		// Snapshot the registry before awaiting. Integrations are intentionally run
 		// in sequence: ReportModel is a SwiftData reference type and is not safe to
 		// read concurrently from child tasks. The send queue coalesces newer reports
 		// so this does not create an unbounded backlog.
 		let registeredReporters = mapping.sorted { lhs, rhs in
+			let lhsNeedsAsset = lhs.value.assetCapability != .unsupported
+			let rhsNeedsAsset = rhs.value.assetCapability != .unsupported
+			if lhsNeedsAsset != rhsNeedsAsset {
+				// Asset-independent destinations must never wait for S3.
+				return !lhsNeedsAsset
+			}
 			if lhs.value.priority == rhs.value.priority {
 				return lhs.key < rhs.key
 			}
 			return lhs.value.priority < rhs.value.priority
 		}
+		guard !registeredReporters.isEmpty else {
+			statusItemManager.toggleStatusItemIcon(.ready)
+			return .success([])
+		}
+		let destinationIDs = registeredReporters.compactMap {
+			PresenceDestinationID(reporterName: $0.key)
+		}
+		let deliveryID = statusItemManager.beginDelivery(to: destinationIDs)
+
+		let assetCapability: PresenceAssetCapability
+		if registeredReporters.contains(where: { $0.value.assetCapability == .requiredPublicURL }) {
+			assetCapability = .requiredPublicURL
+		} else if registeredReporters.contains(where: {
+			$0.value.assetCapability == .optionalPublicURL
+		}) {
+			assetCapability = .optionalPublicURL
+		} else {
+			assetCapability = .unsupported
+		}
+		var assetResolution = PresenceAssetResolution.notRequested
+		var hasResolvedAsset = false
+		var deliveryWasCancelled = false
+
 		for (name, options) in registeredReporters {
-			guard !Task.isCancelled, PreferencesDataModel.shared.reportingAllowed else {
+			guard isDeliveryCurrent(generation) else {
+				deliveryWasCancelled = true
 				break
 			}
 
-			let result = await options.onSend(data)
-			if case .success = result {
+			if options.assetCapability != .unsupported, !hasResolvedAsset {
+				assetResolution = await assetHostingService.resolveApplicationIcon(
+					for: data,
+					capability: assetCapability
+				)
+				hasResolvedAsset = true
+				guard isDeliveryCurrent(generation) else {
+					deliveryWasCancelled = true
+					break
+				}
+			}
+
+			let destinationAssetResolution = options.assetCapability == .unsupported
+				? .notRequested : assetResolution
+			let startedAt = Date()
+			let result = await options.onSend(data, destinationAssetResolution)
+			guard isDeliveryCurrent(generation) else {
+				deliveryWasCancelled = true
+				break
+			}
+			let completedAt = Date()
+			let destinationID = PresenceDestinationID(reporterName: name)
+			let storedDestinationID = destinationID?.rawValue
+				?? name.lowercased().replacingOccurrences(of: " ", with: "-")
+			let storedDestinationName = destinationID?.displayName ?? name
+			if case let .success(receipt) = result {
 				successNames.append(name)
+				storedDeliveryResults.append(
+					SyncDeliveryResult(
+						destinationID: storedDestinationID,
+						destinationDisplayName: storedDestinationName,
+						status: .succeeded,
+						startedAt: startedAt,
+						finishedAt: completedAt,
+						outputSummary: receipt.outputSummary,
+						errorCode: nil,
+						message: nil
+					)
+				)
+				if let destinationID {
+					deliveryResults.append(
+						.init(id: destinationID, state: .succeeded(completedAt))
+					)
+				}
 				continue
 			}
 			if case let .failure(error) = result {
+				PresenceDiagnosticsState.shared.record(
+					code: error.persistenceCode,
+					message: error.persistenceMessage
+				)
+				let storedStatus: SyncDeliveryStatus
+				if case .ignored = error {
+					storedStatus = .skipped
+				} else {
+					storedStatus = .failed
+				}
+				storedDeliveryResults.append(
+					SyncDeliveryResult(
+						destinationID: storedDestinationID,
+						destinationDisplayName: storedDestinationName,
+						status: storedStatus,
+						startedAt: startedAt,
+						finishedAt: completedAt,
+						outputSummary: nil,
+						errorCode: error.persistenceCode,
+						message: error.persistenceMessage
+					)
+				)
 				switch error {
-				case .ignored, .ratelimitExceeded:
+				case .ignored:
 					skippedNames.append(name)
+					if let destinationID {
+						deliveryResults.append(
+							.init(
+								id: destinationID,
+								state: .skipped(
+									message: error.presenceUserFacingMessage,
+									date: completedAt
+								)
+							)
+						)
+					}
 				case .databaseError(let message):
 					failureNames.append(name)
 					NSLog("\(name) database error: \(message)")
+					if let destinationID {
+						deliveryResults.append(
+							.init(
+								id: destinationID,
+								state: .failed(
+									message: error.presenceUserFacingMessage,
+									date: completedAt
+								)
+							)
+						)
+					}
 				default:
 					failureNames.append(name)
 					NSLog("\(name) failed: \(error)")
+					if let destinationID {
+						deliveryResults.append(
+							.init(
+								id: destinationID,
+								state: .failed(
+									message: error.presenceUserFacingMessage,
+									date: completedAt
+								)
+							)
+						)
+					}
 				}
 			}
 		}
-			guard !Task.isCancelled, PreferencesDataModel.shared.reportingAllowed else {
-			return .success(successNames)
+		if deliveryWasCancelled {
+			let completedDestinationIDs = Set(deliveryResults.map(\.id))
+			let cancellationDate = Date()
+			for destinationID in destinationIDs where !completedDestinationIDs.contains(destinationID) {
+				deliveryResults.append(
+					.init(
+						id: destinationID,
+						state: .skipped(
+							message: "Delivery was cancelled because Presence settings changed.",
+							date: cancellationDate
+						)
+					)
+				)
+			}
+
+			// A stale generation must never persist its snapshot after a privacy,
+			// source, destination, pause, or sleep transition.
+			statusItemManager.completeDelivery(
+				deliveryID: deliveryID,
+				results: deliveryResults,
+				assetResolution: assetResolution
+			)
+			return failureNames.isEmpty
+				? .success(successNames)
+				: .failure(.failure(failureNames))
 		}
 
 		// A skipped integration is not a successful delivery. The activity itself
@@ -183,9 +463,23 @@ class Reporter {
 		if !skippedNames.isEmpty {
 			NSLog("Report skipped by integrations: \(skippedNames.joined(separator: ", "))")
 		}
+		guard isDeliveryCurrent(generation) else {
+			statusItemManager.completeDelivery(
+				deliveryID: deliveryID,
+				results: deliveryResults,
+				assetResolution: assetResolution
+			)
+			return .success(successNames)
+		}
 
-		// Persist via DataStore (value-only, no SwiftData leakage)
-		data.integrations = successNames
+		// Persist only the already-sanitized scalar snapshot and normalized audit
+		// metadata. Provider payloads, responses, endpoints, and credentials never
+		// cross this boundary.
+		let storedPayload = StoredSyncEventPayload(
+			trigger: trigger,
+			assetResult: storedAssetResult(for: assetResolution),
+			deliveryResults: storedDeliveryResults
+		)
 		let reportValue = ReportValue(
 			id: data.id,
 			processName: data.processName,
@@ -196,17 +490,52 @@ class Reporter {
 			mediaProcessName: data.mediaProcessName,
 			mediaDuration: data.mediaDuration,
 			mediaElapsedTime: data.mediaElapsedTime,
-			integrations: data.integrations
+			integrations: successNames,
+			decodedSyncPayload: .modern(storedPayload)
 		)
+		// The durable suppression marker is installed synchronously before the
+		// database write. History cannot observe this row until the generation
+		// gate below explicitly publishes it.
+		DataStore.shared.stageReportForPublication(id: reportValue.id)
 		do {
-			try await DataStore.shared.saveReport(reportValue)
+			try await DataStore.shared.saveStagedReport(reportValue)
 		} catch {
-			NSLog("Failed to persist report history: \(error.localizedDescription)")
-			if PreferencesDataModel.shared.reportingAllowed {
-				if !successNames.isEmpty {
-					statusItemManager.updateLastSendProcessNameItem(data)
+			let rollbackError = await rollbackStagedReport(id: reportValue.id)
+			if !isDeliveryCurrent(generation) {
+				if let rollbackError {
+					return staleHistoryRollbackFailure(
+						rollbackError,
+						deliveryID: deliveryID,
+						deliveryResults: deliveryResults,
+						assetResolution: assetResolution,
+						successfulIntegrations: successNames
+					)
 				}
-				statusItemManager.toggleStatusItemIcon(successNames.isEmpty ? .error : .partialError)
+				statusItemManager.completeDelivery(
+					deliveryID: deliveryID,
+					results: deliveryResults,
+					assetResolution: assetResolution
+				)
+				return .success(successNames)
+			}
+			if let rollbackError {
+				NSLog(
+					"Failed to remove an ambiguously saved report history row: \(rollbackError.localizedDescription)"
+				)
+			}
+			NSLog("Failed to persist report history: \(error.localizedDescription)")
+			PresenceDiagnosticsState.shared.record(
+				code: "history_persistence_failed",
+				message: "The local Sync Event could not be saved."
+			)
+			statusItemManager.completeDelivery(
+				deliveryID: deliveryID,
+				results: deliveryResults,
+				assetResolution: assetResolution,
+				persistenceError: error.localizedDescription
+			)
+			if PreferencesDataModel.shared.reportingAllowed {
+				statusItemManager.toggleStatusItemIcon(.error)
 			}
 			return .failure(
 				.persistenceFailure(
@@ -215,15 +544,36 @@ class Reporter {
 				)
 			)
 		}
+		guard publishStagedReportIfCurrent(id: reportValue.id, generation: generation) else {
+			if let rollbackError = await rollbackStagedReport(id: reportValue.id) {
+				return staleHistoryRollbackFailure(
+					rollbackError,
+					deliveryID: deliveryID,
+					deliveryResults: deliveryResults,
+					assetResolution: assetResolution,
+					successfulIntegrations: successNames
+				)
+			}
+			statusItemManager.completeDelivery(
+				deliveryID: deliveryID,
+				results: deliveryResults,
+				assetResolution: assetResolution
+			)
+			return .success(successNames)
+		}
 
 		let isAllFailed = successNames.isEmpty && !failureNames.isEmpty
-		if !successNames.isEmpty, PreferencesDataModel.shared.reportingAllowed {
-			statusItemManager.updateLastSendProcessNameItem(data)
-		}
+		statusItemManager.completeDelivery(
+			deliveryID: deliveryID,
+			results: deliveryResults,
+			assetResolution: assetResolution
+		)
 
 		if failureNames.isEmpty {
 			if PreferencesDataModel.shared.reportingAllowed {
-				statusItemManager.toggleStatusItemIcon(.ready)
+				statusItemManager.toggleStatusItemIcon(
+					assetResolution.isFailure ? .partialError : .ready
+				)
 			}
 			return .success(successNames)
 		} else {
@@ -231,6 +581,106 @@ class Reporter {
 				statusItemManager.toggleStatusItemIcon(isAllFailed ? .error : .partialError)
 			}
 			return .failure(.failure(failureNames))
+		}
+	}
+
+	/// Linearization point for History publication.
+	///
+	/// Reporter and every generation invalidation are MainActor-isolated. The
+	/// generation check and DataStore's synchronous suppression removal therefore
+	/// execute as one uninterrupted main-actor operation.
+	private func publishStagedReportIfCurrent(id: UUID, generation: Int) -> Bool {
+		guard isDeliveryCurrent(generation) else { return false }
+		DataStore.shared.publishStagedReport(id: id)
+		return true
+	}
+
+	private func rollbackStagedReport(id: UUID) async -> Error? {
+		do {
+			try await DataStore.shared.quarantineAndDeleteReport(id: id)
+			return nil
+		} catch {
+			// DataStore deliberately retains the durable marker on failure. History
+			// remains fail-closed and initialization retries physical deletion.
+			return error
+		}
+	}
+
+	private func staleHistoryRollbackFailure(
+		_ error: Error,
+		deliveryID: UUID,
+		deliveryResults: [PresenceDestinationDeliveryResult],
+		assetResolution: PresenceAssetResolution,
+		successfulIntegrations: [String]
+	) -> Result<[String], SendError> {
+		let rollbackMessage = "A privacy-stale Sync Event could not be removed."
+		NSLog("Failed to roll back stale report history: \(error.localizedDescription)")
+		PresenceDiagnosticsState.shared.record(
+			code: "history_privacy_rollback_failed",
+			message: rollbackMessage
+		)
+		statusItemManager.completeDelivery(
+			deliveryID: deliveryID,
+			results: deliveryResults,
+			assetResolution: assetResolution,
+			persistenceError: rollbackMessage
+		)
+		if PreferencesDataModel.shared.reportingAllowed {
+			statusItemManager.toggleStatusItemIcon(.error)
+		}
+		return .failure(
+			.persistenceFailure(
+				message: rollbackMessage,
+				successfulIntegrations: successfulIntegrations
+			)
+		)
+	}
+
+	private func isDeliveryCurrent(_ generation: Int) -> Bool {
+		generation == sendGeneration
+			&& !Task.isCancelled
+			&& PreferencesDataModel.shared.reportingAllowed
+	}
+
+	private func storedAssetResult(
+		for resolution: PresenceAssetResolution
+	) -> SyncAssetResult {
+		switch resolution {
+		case .notRequested:
+			return SyncAssetResult(
+				status: .notRequested,
+				usedFallback: false,
+				errorCode: nil,
+				message: nil
+			)
+		case .notConfigured:
+			return SyncAssetResult(
+				status: .notConfigured,
+				usedFallback: false,
+				errorCode: nil,
+				message: "Application Icon Hosting was not configured."
+			)
+		case .cached:
+			return SyncAssetResult(
+				status: .cached,
+				usedFallback: false,
+				errorCode: nil,
+				message: nil
+			)
+		case .uploaded:
+			return SyncAssetResult(
+				status: .uploaded,
+				usedFallback: false,
+				errorCode: nil,
+				message: nil
+			)
+		case .failed(_, let fallbackPublicURL):
+			return SyncAssetResult(
+				status: .failed,
+				usedFallback: fallbackPublicURL != nil,
+				errorCode: "asset_hosting_failed",
+				message: "The application icon could not be hosted."
+			)
 		}
 	}
 
@@ -298,6 +748,28 @@ class Reporter {
 		}
 	}
 
+	private func applyPrivacyAliases(
+		processAlias: String?,
+		mediaAlias: String?,
+		to data: inout ReportModel
+	) {
+		if let processAlias, !processAlias.isEmpty {
+			data.processName = processAlias
+			if var processInfo = data.processInfoRaw {
+				processInfo.appName = processAlias
+				data.processInfoRaw = processInfo
+			}
+		}
+
+		if let mediaAlias, !mediaAlias.isEmpty {
+			data.mediaProcessName = mediaAlias
+			if var mediaInfo = data.mediaInfoRaw {
+				mediaInfo.processName = mediaAlias
+				data.mediaInfoRaw = mediaInfo
+			}
+		}
+	}
+
 	private func monitor() {
 		guard !isSuspendedForSleep else { return }
 		isMonitoring = true
@@ -320,7 +792,7 @@ class Reporter {
 						PreferencesDataModel.shared.focusReport.value,
 						PreferencesDataModel.shared.enabledTypes.value.types.contains(.process)
 					else { return }
-					self.prepareSend(windowInfo: info)
+					self.prepareSend(windowInfo: info, trigger: .focusChanged)
 				}
 				ApplicationMonitor.shared.startWindowFocusMonitoring()
 			}
@@ -339,32 +811,39 @@ class Reporter {
 						PreferencesDataModel.shared.enabledTypes.value.types.contains(.media)
 					else { return }
 					guard let mediaInfo else {
-						self.statusItemManager.updateCurrentMediaItem(nil)
 						let processEnabled = PreferencesDataModel.shared.enabledTypes.value.types
 							.contains(.process)
 						if processEnabled {
 							self.prepareSend(
 								windowInfo: ApplicationMonitor.shared.getFocusedWindowInfo(),
-								resolveMissingMedia: false
+								resolveMissingMedia: false,
+								trigger: .mediaChanged
 							)
 						} else {
 							self.clearReportedState()
+							self.statusItemManager.clearCurrentPresence()
+							self.statusItemManager.toggleStatusItemIcon(.ready)
 						}
 						return
 					}
-					self.statusItemManager.updateCurrentMediaItem(mediaInfo)
 					let windowInfo = PreferencesDataModel.shared.enabledTypes.value.types.contains(.process)
 						? ApplicationMonitor.shared.getFocusedWindowInfo() : nil
-					self.prepareSend(windowInfo: windowInfo, mediaInfo: mediaInfo)
+					self.prepareSend(
+						windowInfo: windowInfo,
+						mediaInfo: mediaInfo,
+						trigger: .mediaChanged
+					)
 				}
 			}
 		} else if isMediaMonitoring {
 			isMediaMonitoring = false
 			MediaInfoManager.stopMonitoringPlaybackChanges()
-			statusItemManager.updateCurrentMediaItem(nil)
 		}
 
-		statusItemManager.toggleStatusItemIcon(enabledTypes.isEmpty ? .paused : .ready)
+		if enabledTypes.isEmpty {
+			statusItemManager.clearCurrentPresence()
+		}
+		statusItemManager.toggleStatusItemIcon(.ready)
 	}
 
 	private var reporterInitializedTime: Date
@@ -372,7 +851,8 @@ class Reporter {
 	private func prepareSend(
 		windowInfo optionalWindowInfo: FocusedWindowInfo?,
 		mediaInfo optionalMediaInfo: MediaInfo? = nil,
-		resolveMissingMedia: Bool = true
+		resolveMissingMedia: Bool = true,
+		trigger: SyncEventTrigger
 	) {
 		guard !isSuspendedForSleep, PreferencesDataModel.shared.reportingAllowed else { return }
 		let enabledTypes = PreferencesDataModel.shared.enabledTypes.value.types
@@ -392,13 +872,19 @@ class Reporter {
 			finishPreparingSend(
 				windowInfo: windowInfo,
 				mediaInfo: optionalMediaInfo,
-				generation: generation
+				generation: generation,
+				trigger: trigger
 			)
 			return
 		}
 		if !enabledTypes.contains(.media) || !resolveMissingMedia {
 			preparationTask = nil
-			finishPreparingSend(windowInfo: windowInfo, mediaInfo: nil, generation: generation)
+			finishPreparingSend(
+				windowInfo: windowInfo,
+				mediaInfo: nil,
+				generation: generation,
+				trigger: trigger
+			)
 			return
 		}
 
@@ -408,7 +894,8 @@ class Reporter {
 			self.finishPreparingSend(
 				windowInfo: windowInfo,
 				mediaInfo: mediaInfo,
-				generation: generation
+				generation: generation,
+				trigger: trigger
 			)
 		}
 	}
@@ -416,7 +903,8 @@ class Reporter {
 	private func finishPreparingSend(
 		windowInfo: FocusedWindowInfo?,
 		mediaInfo: MediaInfo?,
-		generation: Int
+		generation: Int,
+		trigger: SyncEventTrigger
 	) {
 		guard generation == preparationGeneration,
 			PreferencesDataModel.shared.reportingAllowed
@@ -431,73 +919,105 @@ class Reporter {
 
 		let enabledTypes = PreferencesDataModel.shared.enabledTypes.value.types
 		if enabledTypes.isEmpty {
-			statusItemManager.toggleStatusItemIcon(.paused)
+			statusItemManager.clearCurrentPresence()
+			statusItemManager.toggleStatusItemIcon(.ready)
 			return
 		}
-		if !isNetworkAvailable() {
-			statusItemManager.toggleStatusItemIcon(.offline)
-		} else {
-			statusItemManager.toggleStatusItemIcon(.syncing)
-		}
-
 		var dataModel = ReportModel(
 			windowInfo: nil,
 			integrations: [],
 			mediaInfo: nil)
 
 		let shouldIgnoreArtistNull = PreferencesDataModel.shared.ignoreNullArtist.value
+		let privacyEvaluator = PresencePrivacyEvaluator(
+			configuration: privacyConfigurationCache,
+			legacyHiddenApplications: cachedFilteredProcessBundleIDs,
+			legacyHiddenMediaApplications: cachedFilteredMediaBundleIDs,
+			legacyHiddenMediaNames: cachedFilteredMediaAppNames
+		)
+		var processAlias: String?
+		var mediaAlias: String?
 
 		if enabledTypes.contains(.media), let mediaInfo = mediaInfo, mediaInfo.playing {
-			// Filter media name
-			let isFiltered: Bool
-			if let applicationIdentifier = mediaInfo.applicationIdentifier {
-				isFiltered = cachedFilteredMediaBundleIDs.contains(applicationIdentifier)
-			} else {
-				isFiltered = cachedFilteredMediaAppNames.contains(mediaInfo.processName)
-			}
-
+			let mediaDecision = privacyEvaluator.mediaDecision(
+				applicationIdentifier: mediaInfo.applicationIdentifier,
+				processName: mediaInfo.processName
+			)
 			let hasArtist = !(mediaInfo.artist?.isEmpty ?? true)
-			if !isFiltered && (!shouldIgnoreArtistNull || hasArtist) {
+			if mediaDecision.sharesMedia && (!shouldIgnoreArtistNull || hasArtist) {
 				dataModel.setMediaInfo(mediaInfo)
+				mediaAlias = mediaDecision.displayAlias
 			}
 		}
-		// Filter process name
-		if enabledTypes.contains(.process), let windowInfo,
-			!cachedFilteredProcessBundleIDs.contains(windowInfo.applicationIdentifier)
-		{
-			dataModel.setProcessInfo(windowInfo)
+		if enabledTypes.contains(.process), let windowInfo {
+			let processDecision = privacyEvaluator.processDecision(
+				applicationIdentifier: windowInfo.applicationIdentifier
+			)
+			if processDecision.sharesApplication {
+				dataModel.setProcessInfo(windowInfo)
+				processAlias = processDecision.displayAlias
+				if !PreferencesDataModel.shareWindowTitles.value
+					|| !processDecision.sharesWindowTitle
+				{
+					dataModel.windowTitle = nil
+					if var sanitizedProcessInfo = dataModel.processInfoRaw {
+						sanitizedProcessInfo.title = nil
+						dataModel.processInfoRaw = sanitizedProcessInfo
+					}
+				}
+			}
 		}
-		if let mediaInfo = mediaInfo, mediaInfo.playing {
-			statusItemManager.updateCurrentMediaItem(mediaInfo)
-		}
-
 		// Apply mapping rules to the data model before sending
 		applyMappingRules(to: &dataModel)
+		applyPrivacyAliases(
+			processAlias: processAlias,
+			mediaAlias: mediaAlias,
+			to: &dataModel
+		)
+		statusItemManager.publishCurrentPresence(dataModel)
 
 		// Both sources may have been filtered. Do not send an empty payload to every
 		// integration or create an empty history row.
 		guard dataModel.processInfoRaw != nil || dataModel.mediaInfoRaw != nil else {
+			hasPendingNetworkRefresh = false
 			clearReportedState()
+			statusItemManager.clearCurrentPresence()
 			statusItemManager.toggleStatusItemIcon(.ready)
 			return
 		}
-
-		enqueueSend(dataModel)
+		guard isNetworkAvailable() else {
+			// Do not retain a sanitized model while offline: mappings, privacy rules,
+			// enabled sources, and credentials may all change before connectivity
+			// returns. A single marker is enough to request a fresh capture later.
+			hasPendingNetworkRefresh = true
+			cancelPendingReportWork(preservingNetworkRefresh: true)
+			statusItemManager.toggleStatusItemIcon(.offline)
+			return
+		}
+		hasPendingNetworkRefresh = false
+		statusItemManager.toggleStatusItemIcon(.syncing)
+		enqueueSend(dataModel, trigger: trigger)
 	}
 
-	private func enqueueSend(_ report: ReportModel) {
-		pendingReport = report
+	private func enqueueSend(_ report: ReportModel, trigger: SyncEventTrigger) {
+		pendingPresence = PendingPresence(report: report, trigger: trigger)
 		guard sendTask == nil else { return }
 
 		sendGeneration += 1
 		let generation = sendGeneration
+		activeSendTaskCount += 1
 		sendTask = Task { @MainActor [weak self] in
 			guard let self else { return }
+			defer { self.activeSendTaskCount -= 1 }
 			while !Task.isCancelled, PreferencesDataModel.shared.reportingAllowed,
-				let report = self.pendingReport
+				let pending = self.pendingPresence
 			{
-				self.pendingReport = nil
-				_ = await self.send(data: report)
+				self.pendingPresence = nil
+				_ = await self.send(
+					data: pending.report,
+					generation: generation,
+					trigger: pending.trigger
+				)
 			}
 
 			if self.sendGeneration == generation {
@@ -520,11 +1040,16 @@ class Reporter {
 		statusItemManager.toggleStatusItemIcon(.paused)
 	}
 
-	private func cancelPendingReportWork() {
+	private func cancelPendingReportWork(preservingNetworkRefresh: Bool = false) {
 		preparationGeneration += 1
 		preparationTask?.cancel()
 		preparationTask = nil
-		pendingReport = nil
+		networkRecoveryTask?.cancel()
+		networkRecoveryTask = nil
+		if !preservingNetworkRefresh {
+			hasPendingNetworkRefresh = false
+		}
+		pendingPresence = nil
 		sendGeneration += 1
 		sendTask?.cancel()
 		clearReportedState()
@@ -542,7 +1067,7 @@ class Reporter {
 		) { [weak self] _ in
 			Task { @MainActor in
 				guard let self = self else { return }
-				self.prepareSend(windowInfo: nil)
+				self.prepareSend(windowInfo: nil, trigger: .interval)
 			}
 		}
 		if let timer {
@@ -555,7 +1080,8 @@ class Reporter {
 		timer = nil
 	}
 
-	init() {
+	init(assetHostingService: (any AssetHostingService)? = nil) {
+		self.assetHostingService = assetHostingService ?? S3AssetHostingService()
 		reporterInitializedTime = Date()
 
 		// Register all available extensions
@@ -565,10 +1091,9 @@ class Reporter {
 	}
 
 	private func initializeExtensions() {
-		// Register all reporter extensions
+		// S3 is asset infrastructure and is intentionally not a Presence destination.
 		let extensions: [ReporterExtension] = [
 			MixSpaceReporterExtension(),
-			S3ReporterExtension(),
 			SlackReporterExtension(),
 			DiscordReporterExtension(),
 		]
@@ -580,6 +1105,7 @@ class Reporter {
 
 	deinit {
 		preparationTask?.cancel()
+		networkRecoveryTask?.cancel()
 		sendTask?.cancel()
 	}
 }
@@ -589,27 +1115,103 @@ extension Reporter {
 		subscribeGeneralSettingsChanged()
 		subscribeFilterSettingsChanged()
 		subscribeMappingSettingsChanged()
+		subscribeNetworkAvailabilityChanged()
+	}
+
+	private func subscribeNetworkAvailabilityChanged() {
+		NotificationCenter.default.rx.notification(
+			.processReporterNetworkAvailabilityDidChange
+		)
+		.compactMap { notification in
+			notification.userInfo?[NetworkAvailabilityNotificationKey.isAvailable] as? Bool
+		}
+		.distinctUntilChanged()
+		.observe(on: MainScheduler.instance)
+		.subscribe(onNext: { [weak self] isAvailable in
+			self?.handleNetworkAvailabilityChanged(isAvailable: isAvailable)
+		})
+		.disposed(by: disposeBag)
+	}
+
+	private func handleNetworkAvailabilityChanged(isAvailable: Bool) {
+		let preferences = PreferencesDataModel.shared
+		guard preferences.reportingAllowed,
+			!preferences.enabledTypes.value.types.isEmpty
+		else {
+			hasPendingNetworkRefresh = false
+			networkRecoveryTask?.cancel()
+			networkRecoveryTask = nil
+			return
+		}
+
+		guard isAvailable else {
+			hasPendingNetworkRefresh = true
+			cancelPendingReportWork(preservingNetworkRefresh: true)
+			statusItemManager.toggleStatusItemIcon(.offline)
+			return
+		}
+		guard hasPendingNetworkRefresh else { return }
+
+		// Keep the marker until a fresh, sanitized snapshot either enters the
+		// online queue or is found to contain nothing shareable. This also makes
+		// an early startup recovery robust against the initialization grace period.
+		statusItemManager.toggleStatusItemIcon(.ready)
+		networkRecoveryTask?.cancel()
+		let initializationDelay = max(
+			0,
+			2 - Date().timeIntervalSince(reporterInitializedTime)
+		)
+		networkRecoveryTask = Task { @MainActor [weak self] in
+			if initializationDelay > 0 {
+				try? await Task.sleep(for: .seconds(initializationDelay))
+			}
+			guard let self, !Task.isCancelled, self.hasPendingNetworkRefresh else { return }
+			self.networkRecoveryTask = nil
+			self.prepareSend(
+				windowInfo: ApplicationMonitor.shared.getFocusedWindowInfo(),
+				trigger: .interval
+			)
+		}
 	}
 
 	private func subscribeMappingSettingsChanged() {
-		PreferencesDataModel.mappingList.subscribe { [weak self] mappingList in
+		let values = PreferencesDataModel.mappingList.share(replay: 1)
+		values.subscribe { [weak self] mappingList in
 			self?.mappingCache = mappingList.getList()
 		}.disposed(by: disposeBag)
+
+		values.skip(1)
+			.debounce(.milliseconds(50), scheduler: MainScheduler.instance)
+			.subscribe { [weak self] _ in
+				self?.invalidatePreparedPresenceForPrivacyChange()
+			}
+			.disposed(by: disposeBag)
 	}
 
 	private func subscribeFilterSettingsChanged() {
-		let d1 = PreferencesDataModel.filteredProcesses.subscribe { [weak self] appIds in
-			self?.cachedFilteredProcessBundleIDs = Set(appIds)
-		}
-		let d2 = PreferencesDataModel.filteredMediaProcesses.subscribe { [weak self] appIds in
+		let values = Observable.combineLatest(
+			PreferencesDataModel.filteredProcesses,
+			PreferencesDataModel.filteredMediaProcesses,
+			PreferencesDataModel.presencePrivacyConfiguration
+		).share(replay: 1)
+
+		values.subscribe { [weak self] processIDs, mediaIDs, configuration in
 			guard let self else { return }
-			self.cachedFilteredMediaBundleIDs = Set(appIds)
+			self.cachedFilteredProcessBundleIDs = Set(processIDs)
+			self.cachedFilteredMediaBundleIDs = Set(mediaIDs)
 			self.cachedFilteredMediaAppNames = Set(
-				appIds.map { AppUtility.shared.getAppInfo(for: $0).displayName }
+				mediaIDs.map { AppUtility.shared.getAppInfo(for: $0).displayName }
 			)
+			self.privacyConfigurationCache = configuration
 		}
-		d1.disposed(by: disposeBag)
-		d2.disposed(by: disposeBag)
+		.disposed(by: disposeBag)
+
+		values.skip(1)
+			.debounce(.milliseconds(50), scheduler: MainScheduler.instance)
+			.subscribe { [weak self] _ in
+				self?.invalidatePreparedPresenceForPrivacyChange()
+			}
+			.disposed(by: disposeBag)
 	}
 
 	private func refreshFilterCaches() {
@@ -619,6 +1221,18 @@ extension Reporter {
 		cachedFilteredMediaBundleIDs = Set(mediaIDs)
 		cachedFilteredMediaAppNames = Set(
 			mediaIDs.map { AppUtility.shared.getAppInfo(for: $0).displayName }
+		)
+		privacyConfigurationCache = PreferencesDataModel.presencePrivacyConfiguration.value
+	}
+
+	private func invalidatePreparedPresenceForPrivacyChange() {
+		guard PreferencesDataModel.shared.reportingAllowed,
+			!PreferencesDataModel.shared.enabledTypes.value.types.isEmpty
+		else { return }
+		cancelPendingReportWork()
+		prepareSend(
+			windowInfo: ApplicationMonitor.shared.getFocusedWindowInfo(),
+			trigger: .settingsChanged
 		)
 	}
 
@@ -631,7 +1245,7 @@ extension Reporter {
 				self.monitor()
 				if !preferences.enabledTypes.value.types.isEmpty {
 					self.setupTimer()
-					self.prepareSend(windowInfo: nil)
+					self.prepareSend(windowInfo: nil, trigger: .settingsChanged)
 				}
 			} else {
 				self.dispose()
@@ -651,12 +1265,19 @@ extension Reporter {
 		// Subscribe to extension configuration changes
 		let d3 = Observable.combineLatest(
 			preferences.mixSpaceIntegration,
-			preferences.s3Integration,
 			preferences.slackIntegration,
-			preferences.discordIntegration
-		).subscribe { [weak self] _ in
+			preferences.discordIntegration,
+			preferences.s3Integration
+		).skip(1).subscribe { [weak self] _ in
 			guard let self = self else { return }
+			self.cancelPendingReportWork()
+			PreferencesDataModel.pauseReportingIfDestinationUnavailable()
 			self.updateExtensions()
+			if preferences.reportingAllowed,
+				!preferences.enabledTypes.value.types.isEmpty
+			{
+				self.prepareSend(windowInfo: nil, trigger: .settingsChanged)
+			}
 		}
 
 		let d4 = preferences.enabledTypes.subscribe { [weak self] enabledTypes in
@@ -668,12 +1289,35 @@ extension Reporter {
 				self.disposeTimer()
 			} else {
 				self.setupTimer()
+				self.prepareSend(windowInfo: nil, trigger: .settingsChanged)
 			}
+		}
+		let d5 = preferences.shareWindowTitles.skip(1).subscribe { [weak self] _ in
+			guard let self, preferences.reportingAllowed,
+				preferences.enabledTypes.value.types.contains(.process)
+			else { return }
+			self.cancelPendingReportWork()
+			self.prepareSend(
+				windowInfo: ApplicationMonitor.shared.getFocusedWindowInfo(),
+				trigger: .settingsChanged
+			)
+		}
+		let d6 = preferences.ignoreNullArtist.skip(1).subscribe { [weak self] _ in
+			guard let self, preferences.reportingAllowed,
+				preferences.enabledTypes.value.types.contains(.media)
+			else { return }
+			self.cancelPendingReportWork()
+			self.prepareSend(
+				windowInfo: ApplicationMonitor.shared.getFocusedWindowInfo(),
+				trigger: .settingsChanged
+			)
 		}
 
 		d1.disposed(by: disposeBag)
 		d2.disposed(by: disposeBag)
 		d3.disposed(by: disposeBag)
 		d4.disposed(by: disposeBag)
+		d5.disposed(by: disposeBag)
+		d6.disposed(by: disposeBag)
 	}
 }

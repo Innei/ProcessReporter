@@ -18,14 +18,21 @@ func main() {
         do {
             try await DataStore.shared.initialize()
             guard !Task.isCancelled, !ApplicationState.isTerminating else { return }
+            try await PresencePreferencesMigrator.migrateIfNeeded()
+            guard !Task.isCancelled, !ApplicationState.isTerminating else { return }
             await PreferencesDataModel.hydrateIntegrationCredentials()
             guard !Task.isCancelled, !ApplicationState.isTerminating else { return }
+            PreferencesDataModel.pauseReportingIfDestinationUnavailable()
             ApplicationState.reporter = Reporter()
-            if let warning = PreferencesDataModel.integrationCredentialRecoveryWarning {
+            let credentialWarning = PreferencesDataModel.integrationCredentialRecoveryWarning
+            let needsOnboarding = !PreferencesDataModel.hasCompletedOnboarding.value
+            if needsOnboarding || credentialWarning != nil {
                 SettingWindowManager.shared.showWindow()
-                if let window = SettingWindowManager.shared.settingWindow {
-                    presentCredentialRecoveryWarning(warning, on: window)
-                }
+            }
+            if let credentialWarning,
+               let window = SettingWindowManager.shared.settingWindow
+            {
+                presentCredentialRecoveryWarning(credentialWarning, on: window)
             }
         } catch is CancellationError {
             return
@@ -101,8 +108,52 @@ private func presentCredentialRecoveryWarning(_ warning: String, on window: NSWi
 }
 
 @MainActor
+private final class ApplicationMenuActions: NSObject {
+    static let shared = ApplicationMenuActions()
+
+    @objc func showSettings(_ sender: Any?) {
+        SettingWindowManager.shared.showWindow()
+    }
+}
+
+@MainActor
 private func setupMenu(appDelegate: AppDelegate) {
     let mainMenu = NSMenu()
+
+    // MARK: - Application Menu
+
+    let applicationMenu = NSMenu(title: "ProcessReporter")
+    let applicationMenuItem = NSMenuItem(
+        title: "ProcessReporter",
+        action: nil,
+        keyEquivalent: ""
+    )
+    applicationMenuItem.submenu = applicationMenu
+
+    applicationMenu.addItem(NSMenuItem(
+        title: "Settings…",
+        action: #selector(ApplicationMenuActions.showSettings(_:)),
+        keyEquivalent: ",",
+        target: ApplicationMenuActions.shared
+    ))
+
+    applicationMenu.addItem(NSMenuItem(
+        title: "Check for Updates…",
+        action: #selector(AppDelegate.checkForUpdates(_:)),
+        keyEquivalent: "",
+        target: appDelegate
+    ))
+
+    applicationMenu.addItem(.separator())
+
+    applicationMenu.addItem(NSMenuItem(
+        title: "Quit ProcessReporter",
+        action: #selector(NSApplication.terminate(_:)),
+        keyEquivalent: "q",
+        target: NSApp
+    ))
+
+    mainMenu.addItem(applicationMenuItem)
 
     // MARK: - File Menu
 
@@ -114,19 +165,6 @@ private func setupMenu(appDelegate: AppDelegate) {
         title: "Close Window",
         action: #selector(NSWindow.performClose(_:)),
         keyEquivalent: "w"
-    ))
-
-    fileMenu.addItem(NSMenuItem(
-        title: "Check for Updates…",
-        action: #selector(AppDelegate.checkForUpdates(_:)),
-        keyEquivalent: "",
-        target: appDelegate
-    ))
-
-    fileMenu.addItem(NSMenuItem(
-        title: "Quit App",
-        action: #selector(NSApplication.terminate(_:)),
-        keyEquivalent: "q"
     ))
 
     mainMenu.addItem(fileMenuItem)

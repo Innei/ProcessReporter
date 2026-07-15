@@ -21,6 +21,7 @@ struct ReportValue: Sendable {
     var mediaDuration: Double?
     var mediaElapsedTime: Double?
     var integrations: [String]
+    var decodedSyncPayload: DecodedSyncPayload
 }
 
 struct IconValue: Sendable {
@@ -31,16 +32,91 @@ struct IconValue: Sendable {
     var updatedAt: Date
 }
 
+/// Thread-safe ownership of the durable History suppression set.
+///
+/// Publication must be synchronous at the caller's generation gate: an actor
+/// hop between checking the generation and removing suppression would reopen a
+/// privacy-stale visibility race. The lock therefore protects only this small
+/// set and its UserDefaults representation; all SwiftData access remains actor
+/// isolated below.
+private final class SuppressedReportRegistry: @unchecked Sendable {
+    private let lock = NSLock()
+    private let defaults: UserDefaults
+    private let defaultsKey: String
+    private var reportIDs: Set<UUID>
+
+    init(defaults: UserDefaults, defaultsKey: String) {
+        self.defaults = defaults
+        self.defaultsKey = defaultsKey
+        let storedIDs = defaults.stringArray(forKey: defaultsKey) ?? []
+        reportIDs = Set(storedIDs.compactMap(UUID.init(uuidString:)))
+    }
+
+    func snapshot() -> Set<UUID> {
+        lock.lock()
+        defer { lock.unlock() }
+        return reportIDs
+    }
+
+    @discardableResult
+    func insert(_ id: UUID) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let wasInserted = reportIDs.insert(id).inserted
+        if wasInserted {
+            persistLocked()
+        }
+        return wasInserted
+    }
+
+    @discardableResult
+    func remove(_ id: UUID) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard reportIDs.remove(id) != nil else { return false }
+        persistLocked()
+        return true
+    }
+
+    func removeAll() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !reportIDs.isEmpty else { return }
+        reportIDs.removeAll()
+        persistLocked()
+    }
+
+    private func persistLocked() {
+        defaults.set(
+            reportIDs.map(\.uuidString).sorted(),
+            forKey: defaultsKey
+        )
+    }
+}
+
 // Centralized store that is the only place allowed to touch SwiftData
 actor DataStore {
     static let shared = DataStore()
 
     // Maximum number of reports to keep.
     private let maxReportCount = 5000
+    private static let suppressedReportIDsDefaultsKey =
+        "privacyStaleSyncEventIDsPendingDeletion"
+    // Every new report enters this registry before its database write. History
+    // remains fail-closed until Reporter explicitly publishes the staged row.
+    private nonisolated let suppressedReports: SuppressedReportRegistry
+
+    private init() {
+        suppressedReports = SuppressedReportRegistry(
+            defaults: .standard,
+            defaultsKey: Self.suppressedReportIDsDefaultsKey
+        )
+    }
 
     // Initialize underlying database/container
     func initialize() async throws {
         try await Database.shared.initialize()
+        await retrySuppressedReportDeletions()
     }
 
     // MARK: - Icons
@@ -80,10 +156,47 @@ actor DataStore {
         NotificationCenter.default.post(name: DataStore.changedNotification, object: nil)
     }
 
+    func iconCount() async throws -> Int {
+        try await Database.shared.performBackgroundTask { context in
+            try context.fetchCount(FetchDescriptor<IconModel>())
+        }
+    }
+
+    func deleteAllIcons() async throws {
+        try await Database.shared.performBackgroundTask { context in
+            try context.delete(model: IconModel.self)
+            try context.save()
+        }
+        NotificationCenter.default.post(name: DataStore.changedNotification, object: nil)
+    }
+
     // MARK: - Reports
 
-    func saveReport(_ report: ReportValue) async throws {
+    func reportCount() async throws -> Int {
+        let reportIDs = try await Database.shared.performBackgroundTask { context in
+            try context.fetch(FetchDescriptor<ReportModel>()).map(\.id)
+        }
+        // Snapshot after the database read. Any report newly visible to that read
+        // must already have been staged, so it cannot escape this filter.
+        let suppressedIDs = suppressedReports.snapshot()
+        return reportIDs.lazy.filter { !suppressedIDs.contains($0) }.count
+    }
+
+    /// Installs the durable, fail-closed half of the History two-phase commit.
+    /// This is intentionally nonisolated and synchronous so Reporter can call it
+    /// before any database suspension point.
+    nonisolated func stageReportForPublication(id: UUID) {
+        guard suppressedReports.insert(id) else { return }
+        NotificationCenter.default.post(name: DataStore.changedNotification, object: nil)
+    }
+
+    /// Saves a report that remains invisible to every History read API.
+    func saveStagedReport(_ report: ReportValue) async throws {
+        // Preserve the invariant even if a future caller forgets the explicit
+        // staging call. Reporter still stages synchronously before awaiting here.
+        stageReportForPublication(id: report.id)
         try await Database.shared.performBackgroundTask { context in
+            try Task.checkCancellation()
             let model = ReportModel(
                 windowInfo: nil,
                 integrations: report.integrations,
@@ -99,49 +212,87 @@ actor DataStore {
             model.mediaDuration = report.mediaDuration
             model.mediaElapsedTime = report.mediaElapsedTime
 
+            if case .modern(let payload) = report.decodedSyncPayload {
+                try model.setStoredSyncEventPayload(payload)
+            }
+
             context.insert(model)
+            try Task.checkCancellation()
             try context.save()
         }
-        NotificationCenter.default.post(name: DataStore.changedNotification, object: nil)
 
         // Check and cleanup if database is too large
         await cleanupOldRecordsIfNeeded()
     }
 
+    /// Completes the two-phase commit by making a staged row visible.
+    ///
+    /// Reporter invokes this synchronously on MainActor immediately after its
+    /// generation check. No suspension can therefore occur between validation
+    /// and the suppression removal that is the publication linearization point.
+    nonisolated func publishStagedReport(id: UUID) {
+        guard suppressedReports.remove(id) else { return }
+        NotificationCenter.default.post(name: DataStore.changedNotification, object: nil)
+    }
+
+    func deleteReport(id: UUID) async throws {
+        try await Database.shared.performBackgroundTask { context in
+            var descriptor = FetchDescriptor<ReportModel>(
+                predicate: #Predicate { $0.id == id }
+            )
+            descriptor.fetchLimit = 1
+            guard let model = try context.fetch(descriptor).first else { return }
+            context.delete(model)
+            try context.save()
+        }
+        suppressedReports.remove(id)
+        NotificationCenter.default.post(name: DataStore.changedNotification, object: nil)
+    }
+
+    func quarantineAndDeleteReport(id: UUID) async throws {
+        // Re-staging is idempotent. If the physical delete fails, the durable
+        // marker remains and initialization retries the rollback on next launch.
+        stageReportForPublication(id: id)
+        try await deleteReport(id: id)
+    }
+
     // Fetch all icons sorted (value type only)
     enum IconSortKey: Sendable { case name, applicationIdentifier, url }
+    func fetchIcons() async throws -> [IconValue] {
+        try await Database.shared.performBackgroundTask { context in
+            try context.fetch(FetchDescriptor<IconModel>()).map {
+                IconValue(
+                    name: $0.name,
+                    applicationIdentifier: $0.applicationIdentifier,
+                    url: $0.url,
+                    createdAt: $0.createdAt,
+                    updatedAt: $0.updatedAt
+                )
+            }
+        }
+    }
+
     func fetchIconsSorted(by key: IconSortKey, ascending: Bool) async -> [IconValue] {
         do {
-            return try await Database.shared.performBackgroundTask { context in
-                let models = try context.fetch(FetchDescriptor<IconModel>())
-                let values = models.map {
-                    IconValue(
-                        name: $0.name,
-                        applicationIdentifier: $0.applicationIdentifier,
-                        url: $0.url,
-                        createdAt: $0.createdAt,
-                        updatedAt: $0.updatedAt
-                    )
+            let values = try await fetchIcons()
+            return values.sorted { lhs, rhs in
+                let comparison: ComparisonResult
+                switch key {
+                case .name:
+                    comparison = lhs.name.compare(rhs.name)
+                case .applicationIdentifier:
+                    comparison = lhs.applicationIdentifier.compare(rhs.applicationIdentifier)
+                case .url:
+                    comparison = lhs.url.compare(rhs.url)
                 }
-                return values.sorted { lhs, rhs in
-                    let comparison: ComparisonResult
-                    switch key {
-                    case .name:
-                        comparison = lhs.name.compare(rhs.name)
-                    case .applicationIdentifier:
-                        comparison = lhs.applicationIdentifier.compare(rhs.applicationIdentifier)
-                    case .url:
-                        comparison = lhs.url.compare(rhs.url)
-                    }
-                    if comparison == .orderedSame {
-                        return ascending
-                            ? lhs.applicationIdentifier < rhs.applicationIdentifier
-                            : lhs.applicationIdentifier > rhs.applicationIdentifier
-                    }
+                if comparison == .orderedSame {
                     return ascending
-                        ? comparison == .orderedAscending
-                        : comparison == .orderedDescending
+                        ? lhs.applicationIdentifier < rhs.applicationIdentifier
+                        : lhs.applicationIdentifier > rhs.applicationIdentifier
                 }
+                return ascending
+                    ? comparison == .orderedAscending
+                    : comparison == .orderedDescending
             }
         } catch {
             NSLog("fetchIconsSorted failed: \(error.localizedDescription)")
@@ -171,11 +322,18 @@ actor DataStore {
 
         do {
             try Task.checkCancellation()
-            return try await Database.shared.fetchReportValues(
+            let reports = try await Database.shared.fetchReportValues(
                 searchText: searchText,
-                offset: offset,
-                limit: limit,
+                offset: 0,
+                limit: maxReportCount,
                 ascending: ascending
+            )
+            let suppressedIDs = suppressedReports.snapshot()
+            return Array(
+                reports.lazy
+                    .filter { !suppressedIDs.contains($0.id) }
+                    .dropFirst(offset)
+                    .prefix(limit)
             )
         } catch is CancellationError {
             return []
@@ -185,11 +343,27 @@ actor DataStore {
         }
     }
 
+    func fetchSyncEvents(searchText: String? = nil) async throws -> [SyncEventValue] {
+        try Task.checkCancellation()
+        let reports = try await Database.shared.fetchReportValues(
+            searchText: searchText,
+            offset: 0,
+            limit: maxReportCount,
+            ascending: false
+        )
+        try Task.checkCancellation()
+        let suppressedIDs = suppressedReports.snapshot()
+        return reports
+            .filter { !suppressedIDs.contains($0.id) }
+            .map(\.syncEventValue)
+    }
+
     func deleteAllReports() async throws {
         try await Database.shared.performBackgroundTask { context in
             try context.delete(model: ReportModel.self)
             try context.save()
         }
+        suppressedReports.removeAll()
         NotificationCenter.default.post(name: DataStore.changedNotification, object: nil)
     }
 
@@ -222,13 +396,27 @@ actor DataStore {
 
     func getReportCount() async -> Int {
         do {
-            return try await Database.shared.performBackgroundTask { context in
-                let descriptor = FetchDescriptor<ReportModel>()
-                return try context.fetchCount(descriptor)
-            }
+            return try await reportCount()
         } catch {
             NSLog("getReportCount failed: \(error.localizedDescription)")
             return 0
+        }
+    }
+
+    private func retrySuppressedReportDeletions() async {
+        for reportID in suppressedReports.snapshot().sorted(by: {
+            $0.uuidString < $1.uuidString
+        }) {
+            do {
+                try await deleteReport(id: reportID)
+            } catch {
+                // Keep the durable suppression marker. History remains fail-closed,
+                // and the next application launch will retry the physical rollback.
+                NSLog(
+                    "Deferred privacy-stale Sync Event deletion failed: %@",
+                    error.localizedDescription
+                )
+            }
         }
     }
 }
@@ -262,7 +450,8 @@ extension DataStore {
             mediaProcessName: model.mediaProcessName,
             mediaDuration: model.mediaDuration,
             mediaElapsedTime: model.mediaElapsedTime,
-            integrations: model.integrations
+            integrations: model.integrations,
+            decodedSyncPayload: model.decodedSyncPayload
         )
     }
 }

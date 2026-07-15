@@ -1,370 +1,167 @@
 # ProcessReporter User Guide
 
-Welcome to ProcessReporter! This guide will help you get started with monitoring your computer activity and integrating with your favorite services.
+ProcessReporter is a personal macOS Presence synchronization utility. It shares a sanitized view of what is active now with destinations selected by the user. It is not a productivity tracker and does not calculate work time, rankings, or focus scores.
 
-## Table of Contents
+## Product Model
 
-1. [Getting Started](#getting-started)
-2. [Main Features](#main-features)
-3. [Configuration Examples](#configuration-examples)
-4. [Privacy & Security](#privacy--security)
-5. [Integration Setup](#integration-setup)
-6. [Frequently Asked Questions](#frequently-asked-questions)
-7. [Troubleshooting](#troubleshooting)
+| Concept | Meaning |
+| --- | --- |
+| Presence | The current application, optional window title, and current media |
+| Destination | MixSpace, Slack, or Discord |
+| Application Icon Hosting | Optional S3-compatible storage used to create public icon URLs |
+| Sync Event | A local audit record of one sanitized Presence delivery |
 
----
+S3 is not a Presence destination. It is used on demand only when a destination can benefit from a public application icon URL.
 
-## Getting Started
+## First Launch
 
-### What is ProcessReporter?
+The onboarding flow has five stages:
 
-ProcessReporter is a macOS menu bar application that tracks your computer activity, including:
-- Which applications you're using
-- Window titles of active applications
-- Media playback information (what music/videos you're playing)
-- Time spent on different tasks
+1. **Welcome** explains the Presence-only scope.
+2. **Sources & Privacy** selects Applications, Window Titles, and Media Playback.
+3. **Destination** configures MixSpace, Slack, or Discord. **Set Up Later** completes onboarding with sharing paused.
+4. **Icon Hosting** appears when the selected destination can use a public icon URL. It is optional.
+5. **Review** displays the final sanitized Presence and ready destinations.
 
-This information can be sent to various services like Slack, cloud storage, or your personal blog.
+Accessibility permission is required only for Window Titles. ProcessReporter requests it only after the user enables Window Titles and selects **Request Accessibility Access…**. Application identity remains available without Accessibility permission.
 
-### Installation
+## Menu Bar
 
-1. Download ProcessReporter from the latest release
-2. Open the downloaded `.dmg` file
-3. Drag ProcessReporter to your Applications folder
-4. Launch ProcessReporter from your Applications folder
+Select the menu bar icon to open the Presence popover.
 
-### First Launch
+| Area | Purpose |
+| --- | --- |
+| Global status | Shows setup required, paused, syncing, ready, degraded, or failed |
+| Current Presence | Shows the sanitized application and media currently eligible for sharing |
+| Destinations | Shows the latest result for MixSpace, Slack, and Discord |
+| Inline notices | Explains network waiting, destination failures, or icon-hosting degradation |
 
-When you first open ProcessReporter:
+Select **Current Presence** to open **Privacy & Rules** for the current application. Use the right-click menu for Settings, update checks, and Quit.
 
-1. **Look for the menu bar icon** - You'll see a new icon in your menu bar (top-right of your screen)
-   
-   ![Menu Bar Icon Placeholder]
-   
-2. **Grant Permissions** - macOS will ask for accessibility permissions:
-   - Click "Open System Settings" when prompted
-   - Enable ProcessReporter in Privacy & Security → Accessibility
-   - This allows the app to see window titles
-   
-   ![Permissions Dialog Placeholder]
+## Settings
 
-3. **Configure Your First Integration** - Click the menu bar icon and select "Preferences"
+### General
 
----
+**Share Presence** is the global delivery switch. It can be enabled only after onboarding is complete and at least one valid destination is enabled.
 
-## Main Features
+Sources are independent:
 
-### 1. Activity Monitoring
+- **Applications** shares foreground application identity.
+- **Window Titles** includes the active title when Accessibility permission and privacy policy permit it. It is off by default on new installations.
+- **Media Playback** shares the current title, artist, and media application.
 
-ProcessReporter automatically tracks:
+General also reports Accessibility, media-provider, credential-storage, and Launch at Login state.
 
-- **Application Usage**: Which apps you have open and focused
-- **Window Titles**: What documents, websites, or projects you're working on
-- **Media Playback**: Songs, videos, or podcasts you're playing
-- **Time Tracking**: How long you spend in each application
+### Destinations
 
-![Activity Overview Placeholder]
+Presence destinations are listed separately from resources.
 
-### 2. Smart Filtering
+| Destination | Required configuration | Notes |
+| --- | --- | --- |
+| MixSpace | HTTP(S) endpoint and API token | May use optional public application icon URLs |
+| Slack | Slack API token | Publishes a rendered profile status and supports conditional emoji rules |
+| Discord | Discord Application ID | Publishes local Rich Presence through the Discord client |
 
-You can filter what gets tracked:
+**Application Icon Hosting** configures S3-compatible storage. It stores public icon URLs locally after successful upload and keeps a local queue of application identifiers whose uploads failed. **Retry Failed Uploads** retries that queue with the saved configuration; **Rebuild Cache** re-uploads the current icon for every cached application. Clearing the local icon cache also clears this queue, but never deletes remote objects.
 
-- **Privacy Mode**: Temporarily pause all tracking
-- **Application Filters**: Exclude specific apps from tracking
-- **Window Title Filters**: Hide sensitive window titles
-- **Domain Filters**: Filter out specific websites
+Each detail page keeps an unsaved draft. **Test** uses that draft without saving it, and external-write tests require confirmation. Leaving a modified page offers Save, Discard, and Cancel.
 
-### 3. Activity History
+Credentials are stored outside exported settings. Saved credentials are never displayed in plaintext; use **Replace** or **Remove** to change them.
 
-View your past activity:
+### Privacy & Rules
 
-- See what you worked on throughout the day
-- Search through your history
-- Export data for personal analysis
+Global defaults control whether Application Name, Window Title, and Media are shared or hidden. Application rules can override each field and may define a display alias.
 
-![History View Placeholder]
+Policy precedence is:
 
-### 4. Multiple Integrations
+```text
+General source off
+    > Hide rule
+    > Legacy mapping
+    > Explicit display alias
+```
 
-Send your activity data to:
+Consequences:
 
-- **Slack**: Share what you're working on with your team
-- **Cloud Storage (S3)**: Backup your activity data
-- **MixSpace**: Integrate with your personal blog
-- **Custom Webhooks**: Send to any service you like
+- A disabled source cannot be re-enabled by an application rule.
+- Hide always wins over an alias.
+- Existing legacy Filter entries remain fail-closed Hide projections.
+- Legacy Mappings remain available under **Advanced** and are not silently rewritten.
 
----
+Removing an application rule also removes its legacy Hide projection and may allow the application to follow global defaults again. The confirmation dialog states this consequence.
 
-## Configuration Examples
+### Sync History
 
-### Example 1: Basic Personal Tracking
+Sync History is a local delivery audit, not an activity-analysis view. Each event can include:
 
-Perfect for freelancers or students who want to track their productivity:
+- The sanitized application, allowed window title, and media fields.
+- Per-destination result, duration, safe output summary, and normalized error.
+- Independent Application Icon result.
+- Event ID, timestamp, and trigger reason.
 
-1. Open Preferences → General
-2. Set report interval to 5 minutes
-3. Enable "Track Media Playback" if you want to log music
-4. Leave all integrations disabled for local-only tracking
+Search supports application names, aliases, and media titles. Events may be filtered by destination and aggregate result. **Copy Event as JSON** exports only the Inspector-visible, sanitized data.
 
-### Example 2: Team Collaboration Setup
+ProcessReporter retains at most 5,000 Sync Events and removes the oldest first. Legacy records remain readable. A legacy `S3` success is shown as an asset result, never as a destination.
 
-Great for remote teams who want to share what they're working on:
+### Advanced
 
-1. **Configure Slack Integration**:
-   - Go to Preferences → Integrations → Slack
-   - Add your Slack webhook URL
-   - Set channel to #standup or #working-on
-   - Enable "Only during work hours"
+Advanced contains:
 
-2. **Set Work Hours**:
-   - Preferences → General → Work Hours
-   - Set your typical work schedule
-   - Enable "Pause outside work hours"
+- Reporting interval, focus-change delivery, and incomplete-media behavior.
+- Legacy Mappings.
+- Sync History and icon-cache counts and clearing actions.
+- Credential-free settings export and validated settings import.
+- Application version and update availability.
+- Sanitized diagnostics.
+- **Reset Settings**, which preserves Sync History, icon cache, and protected credentials.
+- **Erase All App Data**, which uses two confirmations and removes settings, local history, icon cache, and protected credential authority before returning to onboarding.
 
-3. **Filter Personal Apps**:
-   - Preferences → Filters
-   - Add personal apps like Spotify, Messages, etc.
-   - These won't be shared with your team
+## Privacy and Security
 
-### Example 3: Content Creator Setup
+ProcessReporter does not capture screenshots, record keystrokes, read file contents, or persist raw provider payloads. Local Sync Events do not contain credentials, authorization headers, endpoints, full provider responses, application icons, media artwork, or raw capture objects.
 
-For bloggers, streamers, or content creators:
+Window titles and media metadata may still be sensitive. Keep Window Titles disabled unless required, review **Current Presence**, and add application-specific Hide rules where appropriate.
 
-1. **Enable Media Tracking**:
-   - Track what music you're listening to
-   - Share currently playing media with your audience
+## Backup and Restore
 
-2. **Configure MixSpace/Blog Integration**:
-   - Add your blog's API endpoint
-   - Set update frequency to match your needs
-   - Enable "Include Media Information"
+Use **Advanced > Backup & Restore**.
 
-3. **Custom Window Title Mapping**:
-   - Map technical titles to friendly names
-   - Example: "Code - project-x" → "Working on Secret Project 🚀"
-
----
-
-## Privacy & Security
-
-### Best Practices
-
-1. **Review What's Being Tracked**:
-   - Regularly check History to see what's being recorded
-   - Use Preview in integrations to see what will be sent
-
-2. **Use Filters Liberally**:
-   - Filter out banking apps and password managers
-   - Hide sensitive project names with window title filters
-   - Use domain filters for private websites
-
-3. **Secure Your Integrations**:
-   - Keep webhook URLs private
-   - Use encrypted connections (HTTPS) only
-   - Regularly rotate API keys
-
-4. **Privacy Mode**:
-   - Use Privacy Mode (⌘+P in menu) for sensitive work
-   - Set up automatic privacy mode for certain apps
-   - Configure privacy mode schedule
-
-### What ProcessReporter Does NOT Do
-
-- ❌ Does NOT capture screenshots
-- ❌ Does NOT record keystrokes
-- ❌ Does NOT access file contents
-- ❌ Does NOT track mouse movements
-- ✅ Only tracks app names, window titles, and media info
-
----
-
-## Integration Setup
-
-### Slack Integration
-
-1. **Create a Slack Webhook**:
-   - Go to your Slack workspace settings
-   - Navigate to "Apps" → "Custom Integrations" → "Incoming Webhooks"
-   - Create a new webhook for your desired channel
-   - Copy the webhook URL
-
-2. **Configure in ProcessReporter**:
-   - Open Preferences → Integrations → Slack
-   - Paste your webhook URL
-   - Choose a display name and emoji
-   - Test with "Send Test Message"
-
-   ![Slack Setup Placeholder]
-
-### S3/Cloud Storage Integration
-
-1. **Prepare Your S3 Bucket**:
-   - Create an S3 bucket in AWS Console
-   - Create an IAM user with write permissions
-   - Generate access keys
-
-2. **Configure in ProcessReporter**:
-   - Enter your AWS credentials
-   - Specify bucket name and region
-   - Choose file format (JSON or CSV)
-   - Set backup frequency
-
-### MixSpace Integration
-
-1. **Get Your API Endpoint**:
-   - Log into your MixSpace admin panel
-   - Navigate to API settings
-   - Copy your personal API endpoint
-
-2. **Configure Connection**:
-   - Add endpoint URL in preferences
-   - Enter your API token
-   - Enable "Share Media Playback"
-   - Test connection
-
----
-
-## Frequently Asked Questions
-
-### General Questions
-
-**Q: Does ProcessReporter slow down my computer?**
-A: No, ProcessReporter uses minimal resources (less than 50MB RAM and virtually no CPU when idle).
-
-**Q: Can I use ProcessReporter on multiple computers?**
-A: Yes! Install it on all your devices. Each will report independently to your configured integrations.
-
-**Q: Is my data stored locally?**
-A: Yes, all activity history is stored locally on your computer. Only data you explicitly configure is sent to integrations.
-
-### Privacy Questions
-
-**Q: Can my employer see my personal activity?**
-A: Only if you configure it to share. By default, nothing is shared. Use filters to exclude personal apps.
-
-**Q: What happens to filtered applications?**
-A: Filtered apps are completely ignored - they're not tracked or stored at all.
-
-**Q: Can I delete my history?**
-A: Yes, go to Preferences → History and use the "Clear History" options.
-
-### Integration Questions
-
-**Q: My Slack messages aren't sending. What's wrong?**
-A: Check your webhook URL and ensure your Slack workspace allows incoming webhooks. Use "Test Message" to diagnose.
-
-**Q: Can I send to multiple Slack channels?**
-A: Currently, you can configure one channel. For multiple channels, consider using Slack workflows to redistribute messages.
-
-**Q: How often does data sync to cloud storage?**
-A: Based on your configuration - typically every hour for S3. You can also trigger manual exports.
-
----
+- Exported property lists exclude MixSpace, Slack, and S3 credentials.
+- Import validates the complete settings snapshot before changing current settings.
+- Historical exports that contain plaintext credentials require an explicit choice: restore them into protected local storage, import without those backup credentials, or cancel.
+- Restored credentials and their imported endpoint or storage target are committed as one protected transaction before the settings become active.
+- When backup credentials are not restored, credentials already protected on this Mac are retained only for an unchanged authority; affected integrations are otherwise disabled for review.
 
 ## Troubleshooting
 
-### Common Issues
+### Window titles are unavailable
 
-#### ProcessReporter doesn't see window titles
+1. Enable **General > Window Titles**.
+2. Select **Open System Settings…** under Accessibility, or use the explicit onboarding permission action.
+3. Enable ProcessReporter in **Privacy & Security > Accessibility**.
+4. Return to ProcessReporter; capability state refreshes when the window becomes active.
 
-**Solution**:
-1. Open System Settings → Privacy & Security → Accessibility
-2. Ensure ProcessReporter is listed and enabled
-3. If not listed, drag ProcessReporter from Applications folder to the list
-4. Restart ProcessReporter
+Application names continue to work without this permission.
 
-#### Menu bar icon disappeared
+### Sharing cannot be enabled
 
-**Solution**:
-1. Check if ProcessReporter is running (look in Activity Monitor)
-2. If not running, launch from Applications
-3. If running but no icon, quit and restart the app
-4. Check menu bar settings - you might have too many icons
+Confirm that:
 
-#### Integration not working
+- Onboarding is complete.
+- At least one of MixSpace, Slack, or Discord is configured, valid, and enabled.
+- Protected credential storage is ready.
+- At least one source is enabled if a visible Presence is expected.
 
-**For Slack**:
-- Verify webhook URL is correct (no extra spaces)
-- Check if your Slack workspace allows webhooks
-- Try the "Test Message" button
-- Check your internet connection
+S3 configuration alone does not satisfy the destination requirement.
 
-**For S3**:
-- Verify AWS credentials are correct
-- Ensure bucket exists and is accessible
-- Check IAM permissions include PutObject
-- Verify region matches your bucket
+### Status says Waiting for Network
 
-#### High memory usage
+The popover retains the current sanitized presentation and displays a **Waiting for network** notice. The aggregate indicator becomes Degraded when a prior successful destination result exists, otherwise Error. No report is queued while offline; after connectivity returns, ProcessReporter captures and sanitizes the latest Presence again before delivery.
 
-**Solution**:
-1. Clear old history data (Preferences → History)
-2. Reduce report frequency
-3. Disable unused integrations
-4. Restart the application
+### Application icon upload fails
 
-### Getting Help
+Open **Destinations > Application Icon Hosting** and review its S3-compatible configuration. Presence delivery may still succeed without the icon; Sync History records the event as degraded when appropriate.
 
-If you're still having issues:
+### A destination fails
 
-1. **Check the Logs**:
-   - Menu Bar → View Logs
-   - Look for error messages
-   
-2. **Report an Issue**:
-   - Include your macOS version
-   - Describe what you expected vs what happened
-   - Include relevant log entries
-
-3. **Privacy-Safe Debugging**:
-   - Enable debug mode without sharing sensitive data
-   - Use test integration endpoints
-   - Clear history after testing
-
----
-
-## Tips & Tricks
-
-### Power User Features
-
-1. **Keyboard Shortcuts**:
-   - `⌘+P` - Toggle Privacy Mode
-   - `⌘+,` - Open Preferences
-   - `⌘+H` - View History
-
-2. **Custom Mappings**:
-   - Create friendly names for technical windows
-   - Use emoji to make reports more fun
-   - Set up project-specific aliases
-
-3. **Automation Ideas**:
-   - Use with time tracking tools
-   - Create daily summary reports
-   - Integrate with your task management system
-
-### Best Practices
-
-1. **Start Simple**:
-   - Begin with just local tracking
-   - Add integrations one at a time
-   - Fine-tune filters as needed
-
-2. **Regular Maintenance**:
-   - Review filters monthly
-   - Clear old history quarterly
-   - Update integration credentials as needed
-
-3. **Team Usage**:
-   - Agree on sharing conventions
-   - Respect privacy boundaries
-   - Use consistent naming for shared projects
-
----
-
-## Need More Help?
-
-- Visit our [GitHub repository](https://github.com/your-repo/ProcessReporter) for updates
-- Check [Discussions](https://github.com/your-repo/ProcessReporter/discussions) for community help
-- Report bugs in [Issues](https://github.com/your-repo/ProcessReporter/issues)
-
-Thank you for using ProcessReporter! We hope it helps you understand and share your work better. 🎯
+Open the event in **Sync History**. The Inspector displays a normalized, non-sensitive error code and safe summary. Provider response bodies and credentials are intentionally unavailable.
