@@ -29,6 +29,7 @@ public final class MediaInfoManager: NSObject {
 
   private static var latestInfo: MediaInfo?
   private static var playbackStateChangedCallback: PlaybackStateChangedCallback?
+  private static var playbackStateObservers: [UUID: PlaybackStateChangedCallback] = [:]
   private static var debounceTask: Task<Void, Never>?
   private static var monitoringGeneration: UInt64 = 0
   private static var isMonitoring = false
@@ -39,17 +40,38 @@ public final class MediaInfoManager: NSObject {
   public static func startMonitoringPlaybackChanges(
     callback: @escaping PlaybackStateChangedCallback
   ) {
-    pauseMonitoringPlaybackChanges()
+    let isReplacingReporterCallback = playbackStateChangedCallback != nil
     playbackStateChangedCallback = callback
+    if isReplacingReporterCallback {
+      pauseMonitoringPlaybackChanges()
+    }
     resumeMonitoringPlaybackChanges()
   }
 
   /// Permanently stops monitoring and releases the registered callback and
   /// cached media value. Use `pauseMonitoringPlaybackChanges()` for sleep.
   public static func stopMonitoringPlaybackChanges() {
-    pauseMonitoringPlaybackChanges()
     playbackStateChangedCallback = nil
-    latestInfo = nil
+    stopMonitoringIfUnused()
+  }
+
+  /// Adds an independent playback observer without taking ownership away from
+  /// the legacy Reporter callback. Companion Live Desk uses this subscription
+  /// so either publishing pipeline can start or stop without disabling the
+  /// other one.
+  @discardableResult
+  static func addPlaybackStateObserver(
+    _ callback: @escaping PlaybackStateChangedCallback
+  ) -> UUID {
+    let identifier = UUID()
+    playbackStateObservers[identifier] = callback
+    resumeMonitoringPlaybackChanges()
+    return identifier
+  }
+
+  static func removePlaybackStateObserver(_ identifier: UUID) {
+    playbackStateObservers.removeValue(forKey: identifier)
+    stopMonitoringIfUnused()
   }
 
   /// Suspends provider resources while retaining the callback and last known
@@ -64,7 +86,7 @@ public final class MediaInfoManager: NSObject {
 
   /// Resumes a previously registered session. The operation is idempotent.
   public static func resumeMonitoringPlaybackChanges() {
-    guard !isMonitoring, playbackStateChangedCallback != nil else { return }
+    guard !isMonitoring, hasActiveCallback() else { return }
 
     monitoringGeneration &+= 1
     let generation = monitoringGeneration
@@ -78,7 +100,7 @@ public final class MediaInfoManager: NSObject {
   }
 
   public static func hasActiveCallback() -> Bool {
-    playbackStateChangedCallback != nil
+    playbackStateChangedCallback != nil || !playbackStateObservers.isEmpty
   }
 
   /// Compatibility entry point for callers that need a complete provider
@@ -102,6 +124,15 @@ public final class MediaInfoManager: NSObject {
   public static func getMediaInfoAsync(timeout seconds: TimeInterval = 3) async throws
     -> MediaInfo?
   {
+    resolve(try await getMediaInfoFetchResultAsync(timeout: seconds))
+  }
+
+  /// Returns the provider's authoritative distinction between a resolved
+  /// no-media state and a temporary lookup failure. Live Desk uses this to
+  /// retain metadata while withholding an unverified timeline position.
+  static func getMediaInfoFetchResultAsync(
+    timeout seconds: TimeInterval = 3
+  ) async throws -> MediaInfoFetchResult {
     let generation = monitoringGeneration
     let result = try await MediaInfoFetchActor.shared.requestInfo(
       using: provider,
@@ -109,7 +140,10 @@ public final class MediaInfoManager: NSObject {
       scope: generation
     )
     guard generation == monitoringGeneration else { throw CancellationError() }
-    return resolve(result)
+    if case .resolved(let info) = result {
+      latestInfo = info
+    }
+    return result
   }
 
   private static func receive(_ info: MediaInfo?, generation: UInt64) {
@@ -126,14 +160,31 @@ public final class MediaInfoManager: NSObject {
       guard
         !Task.isCancelled,
         isMonitoring,
-        generation == monitoringGeneration,
-        let callback = playbackStateChangedCallback
+        generation == monitoringGeneration
       else { return }
 
+      let callbacks = callbacksSnapshot()
+      guard !callbacks.isEmpty else { return }
       latestInfo = info
-      callback(info)
+      for callback in callbacks {
+        callback(info)
+      }
       debounceTask = nil
     }
+  }
+
+  private static func callbacksSnapshot() -> [PlaybackStateChangedCallback] {
+    var callbacks = Array(playbackStateObservers.values)
+    if let playbackStateChangedCallback {
+      callbacks.append(playbackStateChangedCallback)
+    }
+    return callbacks
+  }
+
+  private static func stopMonitoringIfUnused() {
+    guard !hasActiveCallback() else { return }
+    pauseMonitoringPlaybackChanges()
+    latestInfo = nil
   }
 
   private static func resolve(_ result: MediaInfoFetchResult) -> MediaInfo? {

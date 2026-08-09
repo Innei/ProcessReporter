@@ -110,7 +110,21 @@ Provider-specific error text may be used for immediate diagnostics, but History 
 
 ## Sanitized report model
 
-`ReportModel` is the internal bridge between source capture and destination rendering. Its scalar fields are sanitized before `ReporterOptions.onSend` is called.
+`SanitizedPresenceSnapshot` is the canonical, immutable input for the first-party Yohaku connection. `CompanionPresenceDTOMapper` is the only boundary that converts media seconds to integer milliseconds, validates protocol limits, and creates Companion Protocol v2 requests. It does not accept `ReportModel`, raw source objects, credentials, or provider dictionaries.
+
+`YohakuPresenceClient` serializes ordered writes, reserves a durable device sequence before transmission, and retries an ambiguous transport failure with the exact same sequence, request ID, and body. Device Tokens are supplied only to `CompanionHTTPClient`, which places them in the Authorization header. Every authenticated Presence mutation also sends `X-Yohaku-Companion-Version` from `CFBundleShortVersionString` so the server can enforce its advertised minimum client version.
+
+`CompanionConnectionStore.installPairingClaim(_:)` stores validated non-secret metadata and the Device Token through one protected credential transaction. Pairing always leaves Live Desk disabled. `setLiveDeskEnabled(_:)` is the explicit post-preview consent boundary, and `loadEnabledConnection()` does not resolve protected credentials while the flag is false.
+
+`CompanionPairingClient.claimAndInstall(pairingCode:deviceName:connectionStore:)` preflights protected storage and `GET /companion/capabilities` before consuming the one-time code. Minimum client version, Presence schema, and `liveDesk` availability must negotiate successfully before it posts the code without an Authorization header. It then validates the returned device scope and sequence and immediately installs the plaintext Token without returning it to UI code.
+
+`CompanionLiveDeskCoordinator` starts only after local opt-in and successful capability negotiation. The current vertical slice publishes a privacy-sanitized application context with `media: null`, sends a complete snapshot on application activation and the negotiated heartbeat interval, coalesces concurrent refresh requests, and uses ordered clear operations for sleep, screen lock, and shutdown. One `CompanionPresenceAuthorityRegistry` entry retains the same serialized writer and durable sequencer across sleep/wake renegotiation for a given server and device, so an immediate wake snapshot cannot overtake or reuse sequence state from an in-flight clear.
+
+A mutation error with `COMPANION_SCHEMA_UNSUPPORTED` or `COMPANION_FEATURE_UNAVAILABLE`, or an HTTP 426 whose error envelope cannot be decoded, invalidates the current writer. The coordinator cancels its heartbeat, discards that authority, and fetches capabilities again before sending another snapshot.
+
+Every nullable v2 key is encoded explicitly as JSON `null`. This is implemented with custom Codable logic; synthesized Optional encoding is not a valid substitute because it omits absent values.
+
+`ReportModel` remains the compatibility bridge between sanitized source capture and Slack／Discord／legacy MixSpace rendering. It is not a Companion network DTO and must never be reflected or automatically serialized into a first-party request.
 
 Relevant values include:
 
@@ -133,7 +147,7 @@ final class ReportModel {
 }
 ```
 
-The properties named `processInfoRaw` and `mediaInfoRaw` are transient capture structures. They must not be serialized into History or exported. By the time a destination receives the model, these structures have already been filtered and rewritten to match the sanitized scalar snapshot.
+The properties named `processInfoRaw` and `mediaInfoRaw` are transient capture structures. They must not be serialized into History or exported. By the time a legacy Bridge destination receives the model, these structures have already been filtered and rewritten to match the sanitized scalar snapshot.
 
 ## Privacy policy
 
@@ -183,6 +197,8 @@ The decoder returns one of three compatibility states:
 `ApplicationMonitor` supplies focused application identity and optional window information. Accessibility is requested only by explicit user action.
 
 `MediaInfoManager` owns the selected media provider and playback-change lifecycle. The Reporter stops media monitoring when the Media source is disabled, during sleep, and during disposal.
+
+`MediaInfo.duration` and `MediaInfo.elapsedTime` are nullable seconds. `nil` means that the active provider did not supply a reliable value; a real `0` means a known zero and must not be replaced by enrichment data. Construction normalizes non-finite or negative timing values to `nil` and clamps position only when duration is known. Network DTOs convert these values to integer milliseconds at their own boundary.
 
 Source callbacks are generation-scoped. Network recovery requests a fresh capture rather than replaying a retained report.
 

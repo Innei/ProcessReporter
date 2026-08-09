@@ -156,6 +156,31 @@ They do not contain raw capture objects, bundle identifiers, credentials, endpoi
 
 Legacy integration arrays are adapted lazily. Recorded destinations are `Succeeded`; unrecorded current destinations are `Unknown`. A legacy `S3` entry becomes `Legacy Asset Result`. History is capped at 5,000 rows with oldest-first deletion.
 
+## Yohaku Companion Protocol Boundary
+
+The first-party Yohaku connection does not reuse provider dictionaries or serialize `ReportModel`. Its boundary is:
+
+```mermaid
+flowchart LR
+  RAW["Raw application and media state"] --> POLICY["Privacy and mapping"]
+  POLICY --> SNAPSHOT["SanitizedPresenceSnapshot"]
+  SNAPSHOT --> DTO["CompanionPresenceDTOMapper"]
+  DTO --> WRITER["YohakuPresenceClient"]
+  WRITER --> HTTP["CompanionHTTPClient"]
+  SNAPSHOT -. "compatibility projection" .-> REPORT["ReportModel"]
+  REPORT --> BRIDGES["Slack / Discord / legacy MixSpace"]
+```
+
+The mapper owns finite-number checks, seconds-to-millisecond conversion, explicit nullable encoding, field limits, activity-key validation, and HTTPS asset-host allowlisting. The transport owns payload size, endpoint safety, and Authorization header construction. The ordered writer reserves sequence durably before sending and uses a serialized send slot so heartbeat, media, and lifecycle operations cannot race.
+
+An ambiguous transport failure is retried once with the same encoded logical request. A repeated request therefore retains its sequence and request ID; a new sequence is never allocated merely because the first HTTP response was lost.
+
+`CompanionConnectionStore` persists only validated instance, device, sequence, and opt-in metadata in UserDefaults. The Device Token uses the existing `CredentialStore` transaction boundary, and pairing always commits `isLiveDeskEnabled = false`. `CompanionPairingClient` preflights both that protected authority and the server capability contract before consuming a one-time code, then passes the minted Token directly into the store; the token is not resolved again until explicit local opt-in is true.
+
+`CompanionLiveDeskCoordinator` is independent of `Reporter`: it negotiates capabilities before creating a writer, captures an application-only fresh snapshot after the privacy policy, coalesces activation and heartbeat requests, rate-limits against negotiated limits, rebuilds a fresh snapshot after network recovery, and clears best-effort on sleep, screen lock, and termination. `CompanionPresenceAuthorityRegistry` preserves one serialized writer and sequencer for the same paired server/device across lifecycle renegotiation; duplicate sleep/lock notifications are idempotent, and wake explicitly awaits the bounded cleanup task before restarting capability negotiation. Both the local opt-in and the server `liveDesk` capability default closed. Legacy MixSpace delivery therefore remains active without receiving or influencing Companion state.
+
+Schema or feature rejection is not treated as a generic transport degradation. `COMPANION_SCHEMA_UNSUPPORTED`, `COMPANION_FEATURE_UNAVAILABLE`, and an undecodable HTTP 426 terminate the current authority and heartbeat, then re-enter capability negotiation before any further mutation.
+
 ## Preferences and Migration
 
 `PresencePreferencesMigrator` uses ordered version steps:

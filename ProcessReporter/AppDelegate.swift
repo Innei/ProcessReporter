@@ -20,6 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private final class TerminationProgress {
         var settingsDrained = false
         var reporterStopped = false
+        var companionStopped = false
         var databaseFinalized = false
     }
 
@@ -122,6 +123,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             progress.reporterStopped = true
         }
         Task { @MainActor in
+            if let companion = ApplicationState.companionLiveDeskCoordinator {
+                await companion.shutdown()
+            }
+            ApplicationState.companionLiveDeskCoordinator = nil
+            progress.companionStopped = true
+        }
+        Task { @MainActor in
             await SettingsMutationCoordinator.shared.drain()
             progress.settingsDrained = true
             if let reporter {
@@ -141,12 +149,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         while clock.now < deadline,
               !(progress.settingsDrained && progress.reporterStopped
+                && progress.companionStopped
                 && progress.databaseFinalized)
         {
             try? await Task.sleep(for: .milliseconds(50))
         }
 
         if !progress.settingsDrained || !progress.reporterStopped
+            || !progress.companionStopped
             || !progress.databaseFinalized
         {
             NSLog("Termination cleanup reached its five-second deadline")
@@ -237,6 +247,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSWorkspace.didWakeNotification,
             object: nil
         )
+
+        DistributedNotificationCenter.default().addObserver(
+            self,
+            selector: #selector(screenDidLock),
+            name: Notification.Name("com.apple.screenIsLocked"),
+            object: nil
+        )
+        DistributedNotificationCenter.default().addObserver(
+            self,
+            selector: #selector(screenDidUnlock),
+            name: Notification.Name("com.apple.screenIsUnlocked"),
+            object: nil
+        )
     }
 
     private func configureUpdater() {
@@ -267,6 +290,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         reinitializeAfterWake()
     }
 
+    @objc private func screenDidLock(_ notification: Notification) {
+        ApplicationState.companionLiveDeskCoordinator?.handleSleepOrLock()
+    }
+
+    @objc private func screenDidUnlock(_ notification: Notification) {
+        ApplicationState.companionLiveDeskCoordinator?.handleWakeOrUnlock()
+    }
+
     private func cleanupCachesBeforeSleep() {
         wakeTask?.cancel()
         wakeTask = nil
@@ -277,6 +308,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Stop all report preparation, delivery timers, and source callbacks so
         // a missed timer cannot persist a pre-sleep snapshot after wake.
         ApplicationState.reporter?.handleSleep()
+        ApplicationState.companionLiveDeskCoordinator?.handleSleepOrLock()
 
         // Clean up reporter caches
         ApplicationState.reporter?.clearCaches()
@@ -296,6 +328,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         wakeTask = Task { @MainActor [weak self] in
             guard self != nil, !Task.isCancelled else { return }
 
+            ApplicationState.companionLiveDeskCoordinator?.handleWakeOrUnlock()
             guard let reporter = ApplicationState.reporter else { return }
             reporter.handleWakeFromSleep()
         }

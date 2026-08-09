@@ -135,13 +135,11 @@ final class CLIMediaInfoProvider: MediaInfoProvider, @unchecked Sendable {
       numberValue(dictionary["duration"])
       ?? numberValue(dictionary["durationSeconds"])
       ?? numberValue(dictionary["length"])
-      ?? 0
     let elapsed =
       numberValue(dictionary["elapsedTime"])
       ?? numberValue(dictionary["elapsed"])
       ?? numberValue(dictionary["position"])
       ?? numberValue(dictionary["progressSeconds"])
-      ?? 0
 
     var processID =
       intValue(dictionary["pid"])
@@ -329,19 +327,24 @@ final class CLIMediaInfoProvider: MediaInfoProvider, @unchecked Sendable {
     let playing = (liveState["playing"] as? Bool) ?? false
     guard title != nil || playing else { return nil }
 
-    let durationMicros = int64Value(liveState["durationMicros"]) ?? 0
-    let elapsedMicros = int64Value(liveState["elapsedTimeMicros"]) ?? 0
+    let durationMicros = int64Value(liveState["durationMicros"])
+    let elapsedMicros = int64Value(liveState["elapsedTimeMicros"])
     let timestampMicros = int64Value(liveState["timestampEpochMicros"]) ?? 0
 
-    var currentElapsedMicros = max(0, elapsedMicros)
-    if playing, timestampMicros > 0 {
+    let duration = durationMicros.flatMap { value in
+      value >= 0 ? Double(value) / 1_000_000 : nil
+    }
+    var elapsed = elapsedMicros.flatMap { value in
+      value >= 0 ? Double(value) / 1_000_000 : nil
+    }
+    if playing, timestampMicros > 0, let capturedElapsed = elapsed {
       let nowMicros = Int64(Date().timeIntervalSince1970 * 1_000_000)
-      currentElapsedMicros += max(0, nowMicros - timestampMicros)
+      elapsed = capturedElapsed + Double(max(0, nowMicros - timestampMicros)) / 1_000_000
     }
 
-    let duration = Double(max(0, durationMicros)) / 1_000_000
-    var elapsed = Double(currentElapsedMicros) / 1_000_000
-    if duration > 0 { elapsed = min(elapsed, duration) }
+    if let duration, let currentElapsed = elapsed {
+      elapsed = min(currentElapsed, duration)
+    }
 
     var processID =
       intValue(liveState["pid"])
@@ -583,23 +586,26 @@ final class CLIMediaInfoProvider: MediaInfoProvider, @unchecked Sendable {
   private func numberValue(_ value: Any?) -> Double? {
     if let number = value as? NSNumber {
       let result = number.doubleValue
-      return result.isFinite ? max(0, result) : nil
+      return result.isFinite && result >= 0 ? result : nil
     }
     guard let string = value as? String else { return nil }
     if let result = Double(string), result.isFinite {
-      return max(0, result)
+      return result >= 0 ? result : nil
     }
 
     let parts = string.split(separator: ":").reversed()
     var multiplier = 1.0
     var total = 0.0
     for part in parts {
-      guard let value = Double(part.replacingOccurrences(of: ",", with: ".")) else {
+      guard
+        let value = Double(part.replacingOccurrences(of: ",", with: ".")),
+        value >= 0
+      else {
         return nil
       }
       total += value * multiplier
       multiplier *= 60
     }
-    return total.isFinite ? max(0, total) : nil
+    return total.isFinite ? total : nil
   }
 }

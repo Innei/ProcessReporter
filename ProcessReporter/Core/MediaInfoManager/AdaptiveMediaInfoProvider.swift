@@ -162,9 +162,8 @@ final class AdaptiveMediaInfoProvider: MediaInfoProvider, @unchecked Sendable {
       artist: authoritative.artist ?? enrichment.artist,
       album: authoritative.album ?? enrichment.album,
       image: enrichment.image ?? authoritative.image,
-      duration: authoritative.duration > 0 ? authoritative.duration : enrichment.duration,
-      elapsedTime: authoritative.elapsedTime > 0
-        ? authoritative.elapsedTime : enrichment.elapsedTime,
+      duration: authoritative.duration ?? enrichment.duration,
+      elapsedTime: authoritative.elapsedTime ?? enrichment.elapsedTime,
       processID: useEnrichmentProcess ? enrichment.processID : authoritative.processID,
       processName: useEnrichmentProcess ? enrichment.processName : authoritative.processName,
       executablePath: useEnrichmentProcess

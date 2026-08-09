@@ -41,6 +41,11 @@ enum SettingsMaintenanceService {
     private static func eraseAllAppDataTransaction() async throws -> Bool {
         _ = PreferencesDataModel.setReportingEnabled(false)
 
+        if let companion = ApplicationState.companionLiveDeskCoordinator {
+            await companion.shutdown()
+            ApplicationState.companionLiveDeskCoordinator = nil
+        }
+
         let mixSpace = PreferencesDataModel.mixSpaceIntegration.value
         let slack = PreferencesDataModel.slackIntegration.value
         let s3 = PreferencesDataModel.s3Integration.value
@@ -93,6 +98,23 @@ enum SettingsMaintenanceService {
             pendingPreferences: []
         )
 
+        var companionCredentialRemovalFailed = false
+        var companionRetainedClearedKeychainValue = false
+        do {
+            let companionConnectionStore = CompanionConnectionStore(
+                credentialPersistence: ProtectedCompanionCredentialPersistence()
+            )
+            // Disable the public opt-in before touching protected storage. If
+            // Keychain or the journal cannot complete removal, the next launch
+            // still remains fail-closed instead of resuming the old lease.
+            try? await companionConnectionStore.setLiveDeskEnabled(false)
+            let result = try await companionConnectionStore.removeConnection()
+            companionRetainedClearedKeychainValue = result.retainedClearedKeychainValue
+        } catch {
+            companionCredentialRemovalFailed = true
+        }
+        await UserDefaultsCompanionSequencePersistence().removeAllSequences()
+
 		var localDataRemovalFailed = false
 		do {
 			try await DataStore.shared.deleteAllReports()
@@ -107,13 +129,14 @@ enum SettingsMaintenanceService {
 			NSLog("Could not erase the icon cache: %@", error.localizedDescription)
 		}
 
-		guard credentialResult.succeeded else {
+		guard credentialResult.succeeded, !companionCredentialRemovalFailed else {
 			throw SettingsMaintenanceError.credentialRemovalFailed
 		}
 		guard !localDataRemovalFailed else {
 			throw SettingsMaintenanceError.localDataRemovalFailed
 		}
         return credentialResult.retainedClearedKeychainValue
+            || companionRetainedClearedKeychainValue
     }
 
 	private static func publishDestinationDraftInvalidation() {

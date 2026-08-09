@@ -3,6 +3,7 @@ import AppKit
 @MainActor
 enum ApplicationState {
     static var reporter: Reporter?
+    static var companionLiveDeskCoordinator: CompanionLiveDeskCoordinator?
     static var bootstrapTask: Task<Void, Never>?
     static var isTerminating = false
 }
@@ -24,6 +25,15 @@ func main() {
             guard !Task.isCancelled, !ApplicationState.isTerminating else { return }
             PreferencesDataModel.pauseReportingIfDestinationUnavailable()
             ApplicationState.reporter = Reporter()
+            let companionCoordinator = CompanionLiveDeskCoordinator(
+                connectionStore: CompanionConnectionStore(
+                    credentialPersistence: ProtectedCompanionCredentialPersistence()
+                )
+            )
+            ApplicationState.companionLiveDeskCoordinator = companionCoordinator
+            // Pairing persists Live Desk as disabled, so startup performs no
+            // network request until the explicit preview-consent flag is set.
+            companionCoordinator.start()
             let credentialWarning = PreferencesDataModel.integrationCredentialRecoveryWarning
             let needsOnboarding = !PreferencesDataModel.hasCompletedOnboarding.value
             if needsOnboarding || credentialWarning != nil {

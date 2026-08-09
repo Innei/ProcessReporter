@@ -42,6 +42,12 @@ xcodebuild \
 
 ```text
 ProcessReporter/
+├── Companion/
+│   ├── Connection/            Non-secret metadata + protected Device Token adapter
+│   ├── Domain/                Sanitized first-party Presence values
+│   ├── LiveDesk/              Capability-gated heartbeat and lifecycle owner
+│   ├── Protocol/              Versioned DTOs and the only seconds-to-ms mapper
+│   └── Transport/             Authenticated HTTP and ordered device sequence
 ├── Core/
 │   ├── Reporter/              Delivery orchestration and provider adapters
 │   ├── Database/              SwiftData authority and value projections
@@ -49,6 +55,7 @@ ProcessReporter/
 │   └── Utilities/             Monitoring, credentials, network, migrations
 ├── Presence/
 │   ├── Assets/                S3-compatible icon hosting
+│   ├── Capture/               AppKit capture adapters and pure sanitizers
 │   ├── Domain/                UI and Sync Event value models
 │   └── Policy/                Privacy rules and sanitized evaluation
 ├── Features/
@@ -88,6 +95,65 @@ The following invariants are mandatory:
 4. S3 is an `AssetHostingService`, never a `ReporterExtension` or destination.
 5. Provider payloads, endpoints, credentials, public asset URLs, and raw responses do not enter Sync History.
 6. A destination output summary describes a successful final provider render only.
+7. Companion Device Tokens exist only in protected credential memory and the Authorization header; they never enter a DTO, History, or diagnostics.
+8. Every Companion v2 nullable key is encoded explicitly as JSON `null`; missing and cleared are not interchangeable.
+
+## Companion Protocol v2 contract harness
+
+The repository has no test target, so the pure Companion domain and transport boundary has a standalone behavior harness:
+
+```bash
+xcrun swiftc -warnings-as-errors -strict-concurrency=complete \
+  ProcessReporter/Companion/Domain/SanitizedPresenceSnapshot.swift \
+  ProcessReporter/Companion/Domain/CompanionMediaSessionTracker.swift \
+  ProcessReporter/Companion/Protocol/CompanionProtocolV2.swift \
+  ProcessReporter/Companion/Protocol/CompanionCapabilityNegotiator.swift \
+  ProcessReporter/Companion/Protocol/CompanionPresenceDTOMapper.swift \
+  ProcessReporter/Companion/Transport/CompanionHTTPClient.swift \
+  ProcessReporter/Companion/Transport/YohakuPresenceClient.swift \
+  ProcessReporter/Companion/LiveDesk/CompanionPresenceAuthority.swift \
+  scripts/test_companion_protocol_v2.swift \
+  -o /tmp/test_companion_protocol_v2
+
+/tmp/test_companion_protocol_v2
+```
+
+The harness validates observable wire behavior: explicit nulls, Unicode normalization, millisecond conversion, position clamping, resource-host rejection, required nullable response keys, capability negotiation, response request-ID correlation, durable concurrent sequence allocation, Authorization-only credentials, the fixed Companion version header on clear and replace, exact-request retry after an ambiguous transport failure, a deliberately early wake remaining behind the bounded cleanup task, bounded clear returning before its deadline, and schema or feature rejection selecting capability refresh rather than a blind degraded heartbeat.
+
+The protected connection and application-only capture slice has a separate harness:
+
+```bash
+xcrun swiftc -warnings-as-errors -strict-concurrency=complete \
+  ProcessReporter/Companion/Domain/SanitizedPresenceSnapshot.swift \
+  ProcessReporter/Companion/Protocol/CompanionProtocolV2.swift \
+  ProcessReporter/Companion/Protocol/CompanionCapabilityNegotiator.swift \
+  ProcessReporter/Companion/Protocol/CompanionPresenceDTOMapper.swift \
+  ProcessReporter/Companion/Transport/CompanionHTTPClient.swift \
+  ProcessReporter/Companion/Connection/CompanionConnectionStore.swift \
+  ProcessReporter/Companion/Connection/CompanionPairingClient.swift \
+  ProcessReporter/Presence/Capture/CompanionApplicationPresenceSanitizer.swift \
+  scripts/test_companion_connection_capture.swift \
+  -o /tmp/test_companion_connection_capture
+
+/tmp/test_companion_connection_capture
+```
+
+It verifies that protected storage and capabilities are checked before the one-time pairing code is consumed; feature-off, unsupported-schema, and outdated-client responses stop before claim with fixed local states; the code stays in the POST body; the global pairing error envelope retains only an allowlisted fixed code; the minted Token crosses directly into protected storage; pairing remains publicly disabled; disabled startup does not resolve the Device Token; a concurrent disable wins over an in-flight credential resolution; non-secret metadata contains no credential-shaped field or token value; explicit opt-in resolves the protected connection; removal clears both authorities; privacy-hidden applications become an idle snapshot; hidden window titles encode as `null`; and the first slice never fabricates media.
+
+Media timing has a separate provider-level behavior harness:
+
+```bash
+xcrun swiftc -warnings-as-errors -strict-concurrency=complete \
+  ProcessReporter/Core/MediaInfoManager/MediaInfo.swift \
+  ProcessReporter/Core/MediaInfoManager/MediaInfoProvider.swift \
+  ProcessReporter/Core/MediaInfoManager/AdaptiveMediaInfoProvider.swift \
+  scripts/test_media_timing_semantics.swift \
+  -o /tmp/test_media_timing_semantics
+
+/tmp/test_media_timing_semantics
+```
+
+It verifies that unavailable timing remains `nil`, real zero remains `0`, enrichment fills only missing values, and a known duration clamps an out-of-range position.
 
 ## Settings mutations
 

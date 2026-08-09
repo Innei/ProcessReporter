@@ -1,5 +1,11 @@
 # ProcessReporter
 
+> **⚠️ Archived**
+>
+> This repository is no longer actively developed. ProcessReporter has evolved into **Yohaku Companion** — a macOS menu bar app for the Yohaku ecosystem (Live Desk presence, media timeline sync, and more).
+>
+> **→ Use [YohakuCompanion](https://github.com/Innei/YohakuCompanion) instead.**
+
 [![macOS](https://img.shields.io/badge/macOS-15%2B-blue.svg)](https://www.apple.com/macos/)
 [![Swift](https://img.shields.io/badge/Swift-5.9%2B-orange.svg)](https://swift.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)

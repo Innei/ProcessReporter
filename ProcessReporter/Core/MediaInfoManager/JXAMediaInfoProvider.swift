@@ -214,7 +214,7 @@ final class JXAMediaInfoProvider: MediaInfoProvider, @unchecked Sendable {
     return string
   }
 
-  private func numberValue(_ value: Any?) -> Double {
+  private func numberValue(_ value: Any?) -> Double? {
     let number: Double?
     if let value = value as? NSNumber {
       number = value.doubleValue
@@ -224,8 +224,8 @@ final class JXAMediaInfoProvider: MediaInfoProvider, @unchecked Sendable {
       number = nil
     }
 
-    guard let number, number.isFinite else { return 0 }
-    return max(0, number)
+    guard let number, number.isFinite, number >= 0 else { return nil }
+    return number
   }
 
   private func emitIfChanged(_ info: MediaInfo?, generation: UInt64) {

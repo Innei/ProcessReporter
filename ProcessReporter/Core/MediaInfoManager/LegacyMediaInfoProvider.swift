@@ -265,10 +265,13 @@ final class LegacyMediaInfoProvider: MediaInfoProvider, @unchecked Sendable {
     return value
   }
 
-  private func numberValue(_ value: Any?) -> Double {
-    let number = (value as? NSNumber)?.doubleValue ?? 0
-    guard number.isFinite else { return 0 }
-    return max(0, number)
+  private func numberValue(_ value: Any?) -> Double? {
+    guard
+      let number = (value as? NSNumber)?.doubleValue,
+      number.isFinite,
+      number >= 0
+    else { return nil }
+    return number
   }
 }
 
